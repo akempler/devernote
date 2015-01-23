@@ -1,0 +1,654 @@
+<?php
+/**
+ * @file
+ * Integration with Evernote cloud api.
+ *
+ * Provides functionality to retrieve notes and create nodes with them.
+ *
+ * @see https://github.com/evernote/evernote-cloud-sdk-php
+ *
+ * @author: Adam Kempler <akempler@gmail.com>
+ */
+
+// use GuzzleHttp\Stream;
+
+/**
+ * Set to TRUE if testing the module against sandbox.evernote.com.
+ * @var boolean
+ */
+define('DEVERNOTE_SANDBOX', TRUE);
+
+/**
+ * Notes in evernote with this tag will be imported.
+ * This can be overridden on the module's settings page.
+ * @var string
+ */
+define('DEVERNOTE_DEFAULT_TAG', 'drupalimport');
+
+
+/**
+ * Implements hook_menu().
+ */
+function devernote_menu() {
+
+  $items = array();
+
+  $items['admin/config/content/devernote'] = array(
+    'title' => 'Devernote settings',
+    'description' => 'Configure the Devernote module',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array(
+      'devernote_settings_form',
+    ),
+    'access arguments' => array('administer devernote'),
+    'file' => 'devernote.admin.inc',
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  $items['devernote_import'] = array(
+    'title' => 'Import from Evernote',
+    'description' => 'Import notes from evernote.',
+    'page callback' => 'devernote_import_by_tag',
+    'access arguments' => array('import notes'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  return $items;
+}
+
+
+/**
+ * Implements hook_permission().
+ */
+function devernote_permission() {
+  return array(
+    'administer devernote' => array(
+      'title' => t('Administer the Devernote module'),
+    ),
+    'import notes' => array(
+      'title' => t('Use Devernote to import notes.'),
+    ),
+  );
+}
+
+
+/**
+ * Implements hook_node_delete().
+ *
+ * Delete the corresponding devernote_notes record if it exists.
+ */
+function devernote_node_delete($node) {
+
+  db_delete('devernote_notes')->condition('nid', $node->nid)->execute();
+}
+
+
+/**
+ * Check if a note was already imported.
+ *
+ * @param string $note_guid
+ *   The unique guid for the Evernote note.
+ *
+ * @return int
+ *   {node}.nid of the imported note if it exists. Otherwise FALSE.
+ */
+function devernote_check_imported($note_guid) {
+
+  $nid = db_select('devernote_notes')
+  ->fields('devernote_notes', array('nid'))
+  ->condition('note_guid', $note_guid, '=')
+  ->execute()
+  ->fetchField();
+
+  return $nid;
+}
+
+
+/**
+ * Provide a form for importing notes from Evernote.
+ */
+function devernote_import_form($form, &$form_state) {
+
+  $userinfo = $form_state['build_info']['args'][0];
+
+  $import_tag = isset($userinfo['tag']) ? $userinfo['tag'] : variable_get('devernote_import_tag', DEVERNOTE_DEFAULT_TAG);
+  $form['devernote_import_tag'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Import tag'),
+    '#default_value' => $import_tag,
+    '#description' => t('Notes with this tag name will be imported.'),
+  );
+
+  $options = array();
+  $types = node_type_get_types();
+  if (count($types)) {
+    foreach ($types as $type) {
+      $options[$type->type] = $type->name;
+    }
+  }
+
+  $form['devernote_import_type'] = array(
+    '#type' => 'select',
+    '#title' => t('Import as'),
+    '#options' => $options,
+    '#default_value' => variable_get('devernote_import_type', 'article'),
+    '#description' => t('The content type to create from the imported note.'),
+  );
+
+  $form['options'] = array(
+    '#type' => 'fieldset',
+    '#access' => user_access('administer nodes'),
+    '#title' => t('Publishing options'),
+    '#collapsible' => TRUE,
+    '#collapsed' => FALSE,
+    '#group' => 'additional_settings',
+    '#attributes' => array(
+      'class' => array('node-form-options'),
+    ),
+  );
+  $form['options']['status'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Published'),
+    '#default_value' => variable_get('devernote_nodestatus', 0),
+  );
+  $form['options']['promote'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Promoted to front page'),
+    '#default_value' => variable_get('devernote_nodepromoted', 1),
+  );
+  $form['options']['comments'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Allow comments'),
+    '#default_value' => variable_get('devernote_nodecomments', 1),
+  );
+
+  $form['#submit'][] = 'devernote_import_form_submit';
+
+  $form['submit'] = array(
+    '#value' => 'Import',
+    '#type' => 'submit',
+  );
+  return $form;
+}
+
+/**
+ * Submit handler for devernote_import_form().
+ */
+function devernote_import_form_submit($form, &$form_state) {
+  $form_state['rebuild'] = TRUE;
+}
+
+
+/**
+ * Menu callback to display a page for importing Evernote notes as nodes.
+ *
+ * @return string
+ *   The html to display.
+ */
+function devernote_import_by_tag() {
+
+  composer_manager_register_autoloader();
+
+  // TODO handle no $userinfo.
+  $userinfo = devernote_get_userinfo();
+  $client = new \Evernote\Client($userinfo['oauth_token'], DEVERNOTE_SANDBOX);
+
+  if (isset($_POST['form_id']) && $_POST['form_id'] == 'devernote_import_form') {
+
+    $out = '';
+
+    $updates = _devernote_syncstate($client, $userinfo['updates']);
+
+    // There are new or updated notes...
+    if ($updates) {
+
+      $tag_name = isset($_POST['devernote_import_tag']) ? $_POST['devernote_import_tag'] : DEVERNOTE_DEFAULT_TAG;
+      $tag_guid = (isset($userinfo['tag_guid']) && $userinfo['tag_guid'] > 0) ? $userinfo['tag_guid'] : devernote_get_tag_guid($client, $tag_name);
+
+      if ($tag_guid) {
+        $filter = new \EDAM\NoteStore\NoteFilter();
+        $filter->tagGuids  = array($tag_guid);
+
+        $resultSpec = new \EDAM\NoteStore\NotesMetadataResultSpec();
+        $notesMetadataList = $client->getUserNotestore()->findNotesMetadata($userinfo['oauth_token'], $filter, 0, 100, $resultSpec);
+
+        $imported = FALSE;
+        if (count($notesMetadataList->notes)) {
+          $nodes = array();
+          foreach ($notesMetadataList->notes as $noteMetadata) {
+
+            $nid = devernote_check_imported($noteMetadata->guid);
+            // Only import the node if we haven't already imported it.
+            if (!$nid) {
+              $imported = TRUE;
+              $note = $client->getNote($noteMetadata->guid);
+
+              $body = $note->content->toHtml();
+
+              $resources = $note->getResources();
+              if (count($resources)) {
+                foreach ($resources as $resource) {
+                  $fileinfo = _devernote_save_resource($resource, $userinfo['edam_noteStoreUrl'], $userinfo['oauth_token']);
+                  if (($fileinfo) && isset($fileinfo['extension'])) {
+                    $replace = '/images/' . $fileinfo['filename_md5'] . '.' . $fileinfo['extension'];
+                    if (isset($fileinfo['path_imagestyle'])) {
+                      $url = $fileinfo['path_imagestyle'];
+                    }
+                    else {
+                      $path = file_stream_wrapper_get_instance_by_uri('public://')->getDirectoryPath() . DIRECTORY_SEPARATOR . 'devernote' . DIRECTORY_SEPARATOR . $fileinfo['filename'];
+                      $url = file_create_url($path);
+                    }
+                    $body = str_ireplace($replace, $url, $body);
+                  }
+                }
+              }
+
+              $info['title'] = $note->getTitle();
+              $info['body'] = $body;
+              $info['note_guid'] = $note->getGuid();
+              $info['node_type'] = $_POST['devernote_import_type'];
+              $info['status'] = $_POST['status'] ? $_POST['status'] : NULL;
+              $info['promote'] = $_POST['promote'] ? $_POST['promote'] : NULL;
+              $info['comments'] = $_POST['comments'] ? $_POST['comments'] : NULL;
+
+              $nid = _devernote_save_node($info);
+              $nodes[] = '<p>' . l($info['title'], 'node/' . $nid) . '</p>';
+            }
+          }
+        }
+        if ($imported) {
+          $out .= '<h3>The following notes were imported from Evernote:</h3>';
+          $out .= implode('', $nodes);
+        }
+        else {
+          $out .= '<p>No new notes tagged for importing.</p>';
+        }
+        $out .= '<p><em>To re-import an already imported note, delete the corresponding imported item.</em></p>';
+      }
+      else {
+        $out .= '<p>No notes are Tagged with: ' . check_plain($tag_name) . '</p>';
+      }
+    }
+    else {
+      $out .= '<h3>There are no new or updated notes since your last import</h3>';
+    }
+  }
+  else {
+
+    $out = '<h3>Import Notes</h3>';
+
+    $form = drupal_get_form('devernote_import_form', $userinfo);
+    $out .= drupal_render($form);
+  }
+
+  return $out;
+}
+
+
+/**
+ * Get the evernote guid for a specified tag name.
+ *
+ * @param string $tag_name
+ *   The name of the tag.
+ *
+ * @return string
+ *   The tag_guid or FALSE if none found.
+ */
+function devernote_get_tag_guid($client, $tag_name) {
+
+  $notestore = $client->getUserNotestore();
+  $token = $client->getToken();
+  $tags = $notestore->listTags($token);
+
+  $tag_guid = FALSE;
+  if (count($tags)) {
+
+    foreach ($tags as $tag) {
+      if ($tag->name == DEVERNOTE_DEFAULT_TAG) {
+        global $user;
+        $tag_guid = $tag->guid;
+
+        $num_updated = db_update('devernote_user')
+        ->fields(array(
+            'tag_guid' => $tag_guid,
+        ))
+        ->condition('uid', $user->uid)
+        ->execute();
+
+        return $tag_guid;
+      }
+    }
+  }
+
+  return $tag_guid;
+}
+
+
+/**
+ * Retrieve saved authentication information for the current logged in user.
+ *
+ * If none is found, the user will be redirected to Evernote to authenticate
+ * and authorize the app.
+ *
+ * @return array
+ *   'oauth_token' => 'S=s1:U=802ed:E=1513e335e74:C=14ae6822eb8:P=185:A=jsmith-9647:V=2:H=94efbf7661da4dda35246ae3e6e228ea';
+ *   'edam_noteStoreUrl' => 'https://sandbox.evernote.com/shard/s1/notestore'
+ *   'edam_expires' => '1452742499940'
+ *   'updates' => '25'
+ *   'tag' => 'drupalimport'
+ *   'tag_guid' => 'e669c090-d8b2-4324-9eae-56bd31c64'
+ */
+function devernote_get_userinfo() {
+
+  $notestoreurl = '';
+  $userinfo = array();
+  global $user;
+
+  // Using "AS" to convert fields back to the same keys
+  // as we would receive in the $oauth_data array from Evernote.
+  $sql = "SELECT
+            uid,
+            oauth_token,
+            notestoreurl AS edam_noteStoreUrl,
+            expires AS edam_expires,
+            updates,
+            tag,
+            tag_guid
+          FROM {devernote_user}
+          WHERE uid = :uid";
+  $userinfo = db_query($sql, array(':uid' => $user->uid))->fetchAssoc();
+
+  if ($userinfo) {
+    // Check if the saved auth token has expired.
+    $edam_expires = $userinfo['edam_expires'];
+    if ((time() - (60 * 60 * 24)) < $edam_expires) {
+      $notestoreurl = $userinfo['edam_noteStoreUrl'];
+
+      $enc_method = variable_get('devernote_enc_method', '');
+      if (($enc_method) && $enc_method == 'aes') {
+        $userinfo['oauth_token'] = aes_decrypt($userinfo['oauth_token']);
+      }
+      elseif (($enc_method) && $enc_method == 'encrypt') {
+        $userinfo['oauth_token'] = decrypt($userinfo['oauth_token']);
+      }
+    }
+  }
+
+  // We either did not have an existing record for the user or it expired.
+  if (!isset($userinfo['oauth_token'])) {
+    $oauth_data = _devernote_auth();
+    if ($oauth_data) {
+      $oauth_data['tag'] = isset($userinfo['tag']) ? $userinfo['tag'] : DEVERNOTE_DEFAULT_TAG;
+      // The tag_guid will be retrieved during the import process.
+      $oauth_data['tag_guid'] = isset($userinfo['tag_guid']) ? $userinfo['tag_guid'] : 0;
+      $oauth_data['updates'] = isset($userinfo['updates']) ? $userinfo['updates'] : 0;;
+
+      _devernote_save_userinfo($oauth_data);
+    }
+    else {
+      // TODO implement actual message to screen.
+      drupal_set_message('Authorization error', 'warning');
+    }
+  }
+
+  return $userinfo;
+}
+
+
+/**
+ * Check if there are new or updated notes since the last check.
+ *
+ * Saves the new syncstate to the database.
+ * Getting the syncstate (updateCount) is a much less expensive call
+ * than searching the notes for tagged items.
+ *
+ * This will retrieve a SyncState object and check the updateCount:
+ * object \EDAM\NoteStore\SyncState
+ *  public 'currentTime' => int 1421181104176
+ *  public 'fullSyncBefore' => int 1421087557000
+ *  public 'updateCount' => int 20
+ *  public 'uploaded' => int 34066
+ *
+ * @param object \Evernote\Client
+ *   Client object.
+ * @param int $lastcount
+ *   The number of updates previously recorded.
+ *
+ * @return boolean
+ *   TRUE if there are new or updated items. Otherwise FALSE.
+ *
+ * @see https://dev.evernote.com/doc/articles/polling_notification.php
+ */
+function _devernote_syncstate($client, $lastcount = 0) {
+
+  $noteStore = $client->getUserNotestore();
+  $syncState = $noteStore->getSyncState($client->getToken());
+  $currentcount = $syncState->updateCount;
+
+  global $user;
+
+  if ($currentcount > $lastcount) {
+    // Save the current count to the db.
+    $num_updated = db_update('devernote_user')
+    ->fields(array(
+        'updates' => $currentcount,
+    ))
+    ->condition('uid', $user->uid)
+    ->execute();
+
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+
+/**
+ * Authorize the Evernote connection.
+ *
+ * @return mixed
+ *   On success returns an array with the following info:
+ *    array (size=7)
+ *    'oauth_token' => 'S=s1:U=802ed:E=1513e335e74:C=14ae6822eb8:P=185:A=jsmith-9647:V=2:H=94efbf7661da4dda35246ae3e6e228ea'
+ *    'oauth_token_secret' => ''
+ *    'edam_shard' => 's1'
+ *    'edam_userId' => '493472'
+ *    'edam_expires' => '1452742499940'
+ *    'edam_noteStoreUrl' => 'https://sandbox.evernote.com/shard/s1/notestore'
+ *    'edam_webApiUrlPrefix' => 'https://sandbox.evernote.com/shard/s1/'
+ *  On failure will return FALSE.
+ */
+function _devernote_auth() {
+
+  $oauth_handler = new \Evernote\Auth\OauthHandler(DEVERNOTE_SANDBOX);
+  $key = variable_get('devernote_consumer_key', '');
+  $secret = variable_get('devernote_secret_key', '');
+
+  global $base_url;
+  $callback = $base_url . request_uri();
+
+  try {
+    $oauth_data = $oauth_handler->authorize($key, $secret, $callback);
+
+    global $user;
+    if (module_exists('aes')) {
+      $oauth_data['oauth_token'] = aes_encrypt($oauth_data['oauth_token']);
+      variable_set('devernote_enc_method', 'aes');
+    }
+    elseif (module_exists('encrypt')) {
+      $oauth_data['oauth_token'] = encrypt($oauth_data['oauth_token']);
+      variable_set('devernote_enc_method', 'encrypt');
+    }
+    else {
+      variable_set('devernote_enc_method', 'none');
+    }
+
+    return $oauth_data;
+
+  }
+  catch (Evernote\Exception\AuthorizationDeniedException $e) {
+    // If the user declines the authorization, an exception is thrown.
+    return FALSE;
+  }
+}
+
+
+/**
+ * Save oauth data returned from Evernote locally.
+ *
+ * Also saves additional information such as the tag used for import.
+ *
+ * Make sure $userinfo if fully populated before calling this
+ * so that it will properly update existing records.
+ * For example, if the module needs to reauthenticate a user.
+ *
+ * @param array $userinfo
+ *   Array of data to save.
+ */
+function _devernote_save_userinfo($userinfo) {
+
+  global $user;
+
+  $digits = strlen((string) $userinfo['edam_expires']);
+  if ($digits == 13) {
+    $userinfo['edam_expires'] = (int) $userinfo['edam_expires'] / 1000;
+  }
+
+  db_merge('devernote_user')
+  ->key(array('uid' => $user->uid))
+  ->fields(array(
+  'oauth_token' => $userinfo['oauth_token'],
+  'notestoreurl' => $userinfo['edam_noteStoreUrl'],
+  'expires' => (int) $userinfo['edam_expires'],
+  'updates' => $userinfo['updates'],
+  'tag' => $userinfo['tag'],
+  'tag_guid' => $userinfo['tag_guid'],
+  ))
+  ->execute();
+}
+
+
+/**
+ * Save an imported Evernote note as a node.
+ *
+ * @param array $info
+ *   The data to save for the node.
+ *   'body' - the node body content to save.
+ *   'title' - the title for the node.
+ *   'status' - the publishing status. Defaults to 0, unpublished.
+ *   'comment' - 0 = comments disabled, 1 = read only (default), 2 = read/write.
+ *   'promote' - Promoted to the front page or not. Defaults to 1.
+ *   'format' - plain_text, filtered_html, full_html (default).
+ *    You can set the defaults for status, comment, format, and promote on the
+ *    module's configuration page.
+ */
+function _devernote_save_node($info) {
+
+  global $user;
+
+  $node = new stdClass();
+  $node->type = $info['node_type'];
+  $node->title    = $info['title'];
+  node_object_prepare($node);
+
+  $node->uid = $user->uid;
+  $node->language = LANGUAGE_NONE;
+
+  $node->body[$node->language][0]['value']   = $info['body'];
+  $node->body[$node->language][0]['summary'] = text_summary($info['body']);
+  $node->body[$node->language][0]['format']  = 'full_html';
+
+  $node->status = isset($info['status']) ? $info['status'] : variable_get('devernote_nodestatus', 0);
+  $node->comment = isset($info['comment']) ? $info['comment'] : variable_get('devernote_nodecomments', 1);
+  $node->promote = isset($info['promote']) ? $info['promote'] : variable_get('devernote_nodepromoted', 1);
+
+  node_save($node);
+
+  Database::getConnection('default', 'default')->insert('devernote_notes')
+  ->fields(array(
+  'note_guid' => $info['note_guid'],
+  'nid' => $node->nid,
+  'uid' => $user->uid,
+  ))
+  ->execute();
+
+  return $node->nid;
+}
+
+
+/**
+ * Save a resource (image).
+ *
+ * @param EDAM\Types\Resource $resource
+ *   A Resource object.
+ * @param string $notestoreurl
+ *   For example: https://sandbox.evernote.com/shard/s1/notestore
+ * @param string $auth_token
+ *   For example:
+ *   S=s1:U=802ed:E=1513e335e74:C=14ae6822eb8:P=185:A=jsmith-9647:V=2:H=94efbf7661da4dda35246ae3e6e228ea
+ *
+ * @return array
+ *   array if successful otherwise FALSE.
+ *   - 'filename' of the saved file if successful.
+ *   - 'path_original'
+ *   - 'path_imagestyle'
+ *   - 'extension'
+ *   - 'filename_md5'
+ */
+function _devernote_save_resource($resource, $notestoreurl, $auth_token) {
+
+  $fileinfo = array();
+
+  // TODO this assumes edam_webApiUrlPrefix
+  // is the same as the notestoreurl without "notestore".
+  $pieces = explode('/', $resource->mime);
+  $extension = array_pop($pieces);
+
+  $url = rtrim($notestoreurl, "notestore");
+  $url .= 'res/' . $resource->guid . '.' . $extension;
+
+  $dir = variable_get('file_public_path', conf_path() . '/files') . '/devernote';
+  file_prepare_directory($dir, FILE_CREATE_DIRECTORY);
+
+  $filename = $resource->attributes->fileName;
+  $extensions = array('jpg', 'jpeg', 'gif', 'png');
+  $filename = file_munge_filename($filename, implode(' ', $extensions));
+  $filepath = $dir . '/' . $filename;
+
+  $g = new GuzzleHttp\Client();
+  $request = $g->createRequest('GET', $url);
+  $request->setHeader('Cookie', 'auth=' . $auth_token);
+  $response = $g->send($request, ['stream' => TRUE]);
+  $length = $response->getHeader('Content-Length');
+  $size = file_put_contents($filepath, $response->getBody());
+
+  // TODO possibly compare length and size.
+  if ($size) {
+    $fileinfo['path_original'] = $filepath;
+    $fileinfo['filename'] = $filename;
+    // The sdk converts jpeg to jpg for the filename.
+    $fileinfo['extension'] = ($extension == 'jpeg') ? 'jpg' : $extension;
+    // The sdk converts the filename to an md5 hash of the body.
+    $fileinfo['filename_md5'] = md5($resource->data->body);
+
+    $imagestyle = variable_get('devernote_imagestyle', 'none');
+    // $errors = file_validate_is_image($filepath);
+    if (in_array($extension, $extensions) && $imagestyle != 'none') {
+      $styledef = image_style_load($imagestyle);
+      if (count($styledef)) {
+        $upload_uri = "public://devernote/" . $filename;
+        $success = image_style_create_derivative(
+            $styledef,
+            $upload_uri,
+            image_style_path($imagestyle, $upload_uri)
+        );
+        if ($success) {
+          $fileinfo['path_imagestyle'] = image_style_url($imagestyle, $upload_uri);
+        }
+      }
+    }
+
+    return $fileinfo;
+  }
+  return FALSE;
+}

@@ -1,0 +1,110 @@
+<?php
+/**
+ * @file
+ * Provides installation functions.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function devernote_schema() {
+
+  $schema['devernote_notes'] = array(
+    'description' => 'Relationship of evernote note id to drupal node nid.',
+    'fields' => array(
+      'note_guid' => array(
+        'description' => 'The unique guid of the evernote note.',
+        'type' => 'varchar',
+        'length' => '250',
+        'not null' => TRUE,
+        'default' => '0',
+      ),
+      'nid' => array(
+        'description' => 'The {node}.nid of the node created from the note.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => '0',
+      ),
+      'uid' => array(
+        'description' => 'The {users}.uid of the user creating the note.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => '0',
+      ),
+    ),
+    'primary key' => array('note_guid'),
+    'indexes' => array(
+      'note_guid' => array('note_guid'),
+      'nid' => array('nid'),
+    ),
+  );
+
+  $schema['devernote_user'] = array(
+    'description' => 'User specific data.',
+    'fields' => array(
+      'uid' => array(
+        'description' => 'The {users}.uid of the user creating the note.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'oauth_token' => array(
+        'description' => 'The oauth token provided by evernote.',
+        'type' => 'varchar',
+        'length' => '250',
+        'not null' => TRUE,
+        'default' => '0',
+      ),
+      'notestoreurl' => array(
+        'description' => 'The notestoreurl provided by evernote.',
+        'type' => 'varchar',
+        'length' => '250',
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'expires' => array(
+        'description' => 'Unix timestamp for when the oauth_token expires.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'updates' => array(
+        'description' => 'The number of evernote updates for the user.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'tag' => array(
+        'description' => 'The Evernote tag used for flagging imports.',
+        'type' => 'varchar',
+        'length' => '50',
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'tag_guid' => array(
+        'description' => 'guid of the Evernote tag used for flagging imports.',
+        'type' => 'varchar',
+        'length' => '250',
+        'not null' => TRUE,
+        'default' => '0',
+      ),
+    ),
+    'primary key' => array('uid'),
+    'indexes' => array(
+      'uid' => array('uid'),
+    ),
+  );
+
+  return $schema;
+}
+
+
+/**
+ * Implements hook_uninstall().
+ */
+function devernote_uninstall() {
+
+  variable_del('devernote_enc_method');
+}

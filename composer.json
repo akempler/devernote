@@ -1,0 +1,6 @@
+{
+  "require": {
+    "guzzlehttp/guzzle": "4.*",
+    "evernote/evernote-cloud-sdk-php": "dev-master"
+  }
+}

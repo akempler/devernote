@@ -1,0 +1,10 @@
+name = Devernote
+description = Provide integration Evernote.
+core = 7.x
+configure = admin/config/content/devernote
+dependencies[] = composer_manager
+recommends[] = aes
+
+package = xeego
+
+version = "7.x-1.0"
