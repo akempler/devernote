@@ -16,7 +16,7 @@
  * Set to TRUE if testing the module against sandbox.evernote.com.
  * @var boolean
  */
-define('DEVERNOTE_SANDBOX', TRUE);
+define('DEVERNOTE_SANDBOX', FALSE);
 
 /**
  * Notes in evernote with this tag will be imported.
@@ -336,7 +336,7 @@ function devernote_get_tag_guid($client, $tag_name) {
  *   'edam_expires' => '1452742499940'
  *   'updates' => '25'
  *   'tag' => 'drupalimport'
- *   'tag_guid' => 'e669c090-d8b2-4324-9eae-56bd31c64'
+ *   'tag_guid' => 'e669c090-d8b2-1323-9eae-56bd31c64'
  */
 function devernote_get_userinfo() {
 
@@ -381,7 +381,7 @@ function devernote_get_userinfo() {
       $oauth_data['tag'] = isset($userinfo['tag']) ? $userinfo['tag'] : DEVERNOTE_DEFAULT_TAG;
       // The tag_guid will be retrieved during the import process.
       $oauth_data['tag_guid'] = isset($userinfo['tag_guid']) ? $userinfo['tag_guid'] : 0;
-      $oauth_data['updates'] = isset($userinfo['updates']) ? $userinfo['updates'] : 0;;
+      $oauth_data['updates'] = isset($userinfo['updates']) ? $userinfo['updates'] : 0;
 
       _devernote_save_userinfo($oauth_data);
     }
