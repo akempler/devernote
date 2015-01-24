@@ -5,14 +5,6 @@ http://adamkempler.com
 
 
 ### Installation and Setup
-
-- Install the composer_manager module:
-  https://www.drupal.org/project/composer_manager
-  
-- Install the aes or encrypt module:
-  https://www.drupal.org/project/aes
-  Not required but if it's installed, 
-  the auth key will be encrypted.
   
 - Get an Evernote api key from:
   https://dev.evernote.com/doc/ (and click "GET AN API KEY").
@@ -21,6 +13,15 @@ http://adamkempler.com
   you will have to request that it be made available for production use.
   By default it is initially just for use with their sandbox site.
 
+- Install the composer_manager module:
+  https://www.drupal.org/project/composer_manager
+  
+- Install the aes or encrypt module:
+  https://www.drupal.org/project/aes
+  https://www.drupal.org/project/encrypt
+  Not required but recommended. 
+  If one is installed, the auth key will be encrypted.
+  
 - Install the devernote module.
   Configure it at: /admin/config/content/devernote
   Specify permissions for which roles can administer and import notes.
@@ -31,7 +32,11 @@ http://adamkempler.com
 ### Usage
 
 - Import notes on the /devernote_import page.
-  Notes tagged in Evernote with the specified tag will be imported.
+  Notes tagged in Evernote with the specified tag will be imported. 
+  Embedded images will also be imported.
+  
+- You can specify an imagecache style to apply to images that are imported 
+  with notes. This can be done on the /admin/config/content/devernote page.
   
 - To reimport a note from Evernote, just delete the node in Drupal and 
   run the import again.
@@ -39,9 +44,10 @@ http://adamkempler.com
 
 ### Limitations
 
-- Fields: Currently is only uses the title and body fields of nodes.
-  A more flexible solution would be to let the user select the fields for 
-  the specified content type that the note will be imported into.
+- Fields: Currently it only uses the title and body fields of nodes.
+  A longer term, more flexible solution would be to let the user 
+  select the fields for the specified content type that the note will be 
+  imported into.
   
 - Importing files: Currently it will only import embedded images. 
   Additionally it will place them as inline images (though you can specify 
