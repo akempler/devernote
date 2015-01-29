@@ -45,6 +45,23 @@ function devernote_settings_form() {
     '#description' => t('Set the default value for imported notes. This can be overridden when importing a note.'),
   );
 
+  global $user;
+  $formats = filter_formats($user);
+  $default_format = filter_default_format($user);
+  $options = array();
+  foreach ($formats as $format) {
+    $options[$format->format] = $format->name;
+  }
+  if (count($options)) {
+    $form['devernote_inputformat'] = array(
+      '#type' => 'select',
+      '#title' => t('Input Format'),
+      '#options' => $options,
+      '#default_value' => variable_get('devernote_inputformat', $default_format),
+      '#description' => t('Select an input format for the imported note.'),
+    );
+  }
+
   $options = array();
   // Probably safe to assume it would always be enabled?
   if (module_exists('image')) {

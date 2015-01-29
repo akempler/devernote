@@ -162,6 +162,48 @@ function devernote_import_form($form, &$form_state) {
     '#default_value' => variable_get('devernote_nodecomments', 1),
   );
 
+  $isloaded = extension_loaded('libxml');
+  if ($isloaded) {
+    $form['format'] = array(
+        '#type' => 'fieldset',
+        '#title' => t('Format import'),
+        '#collapsible' => TRUE,
+        '#collapsed' => TRUE,
+        '#group' => 'additional_settings',
+        '#attributes' => array(
+            'class' => array('node-form-options'),
+        ),
+    );
+
+    global $user;
+    $formats = filter_formats($user);
+    $default_format = variable_get('devernote_inputformat', '');
+    if (!$default_format) {
+      $default_format = filter_default_format($user);
+    }
+    $options = array();
+    foreach ($formats as $format) {
+      $options[$format->format] = $format->name;
+    }
+    if (count($options)) {
+      $form['devernote_inputformat'] = array(
+          '#type' => 'select',
+          '#title' => t('Input Format'),
+          '#options' => $options,
+          '#default_value' => $default_format,
+          '#description' => t('Select an input format for the imported note.'),
+      );
+    }
+
+    $form['format']['input_format'] = array(
+      '#type' => 'select',
+      '#title' => t('Input Format'),
+      '#options' => $options,
+      '#default_value' => variable_get('devernote_input_format', 'article'),
+      '#description' => t('The content type to create from the imported note.'),
+    );
+  }
+
   $form['#submit'][] = 'devernote_import_form_submit';
 
   $form['submit'] = array(
@@ -247,9 +289,11 @@ function devernote_import_by_tag() {
               $info['body'] = $body;
               $info['note_guid'] = $note->getGuid();
               $info['node_type'] = $_POST['devernote_import_type'];
-              $info['status'] = $_POST['status'] ? $_POST['status'] : NULL;
-              $info['promote'] = $_POST['promote'] ? $_POST['promote'] : NULL;
-              $info['comments'] = $_POST['comments'] ? $_POST['comments'] : NULL;
+              $info['status'] = ($_POST['status']) ? $_POST['status'] : NULL;
+              $info['promote'] = ($_POST['promote']) ? $_POST['promote'] : NULL;
+              $info['comments'] = ($_POST['comments']) ? $_POST['comments'] : NULL;
+              global $user;
+              $info['input_format'] = ($_POST['devernote_inputformat']) ? $_POST['devernote_inputformat'] : filter_default_format($user);
 
               $nid = _devernote_save_node($info);
               $nodes[] = '<p>' . l($info['title'], 'node/' . $nid) . '</p>';
@@ -538,7 +582,7 @@ function _devernote_save_userinfo($userinfo) {
  *   'status' - the publishing status. Defaults to 0, unpublished.
  *   'comment' - 0 = comments disabled, 1 = read only (default), 2 = read/write.
  *   'promote' - Promoted to the front page or not. Defaults to 1.
- *   'format' - plain_text, filtered_html, full_html (default).
+ *   'input_format' - plain_text, filtered_html, full_html, etc.
  *    You can set the defaults for status, comment, format, and promote on the
  *    module's configuration page.
  */
@@ -556,7 +600,7 @@ function _devernote_save_node($info) {
 
   $node->body[$node->language][0]['value']   = $info['body'];
   $node->body[$node->language][0]['summary'] = text_summary($info['body']);
-  $node->body[$node->language][0]['format']  = 'full_html';
+  $node->body[$node->language][0]['format']  = $info['input_format'];
 
   $node->status = isset($info['status']) ? $info['status'] : variable_get('devernote_nodestatus', 0);
   $node->comment = isset($info['comment']) ? $info['comment'] : variable_get('devernote_nodecomments', 1);
