@@ -83,5 +83,44 @@ function devernote_settings_form() {
     '#description' => t('An image style to apply to imported images.'),
   );
 
+  $isloaded = extension_loaded('libxml');
+  if ($isloaded) {
+    $form['conversions'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Advanced HTML Conversions:'),
+      '#collapsible' => TRUE,
+      '#collapsed' => FALSE,
+      '#group' => 'html_conversions',
+      '#attributes' => array(
+        'class' => array('node-form-options'),
+      ),
+    );
+    $form['conversions']['devernote_div2p'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('Convert divs to p tags'),
+        '#default_value' => variable_get('devernote_div2p', 0),
+        '#description' => t('Check this to convert divs to p tags. This can be overridden when importing a note.'),
+    );
+    $form['conversions']['convertheadings_info'] = array(
+      '#markup' => '<strong>Font size to heading tag conversions</strong><br />
+                    When you set different font sizes in Evernote, it uses the font-size attribute to style the text.
+                    If you prefer to have your html rendered using html h tags instead, you can use the following text area to specify conversions.<br />
+                    Enter font sizes followed by a comma with the corresponding html h tag you want it converted to.
+                    One per line. For example:<br />
+                    11, h5<br />
+                    12, h5<br />
+                    13, h4<br />
+                    With the above settings, when the note gets imported any text wrapped with a &lt;div style="font-size: 11px;"&gt; would get wrapped in an h5 tag instead. <br />
+                    These settings can be overridden when importing a note.<br />
+                    NOTE: these settings will be ignored if the input format is set to plain text when importing.',
+    );
+    $form['conversions']['devernote_convertheadings'] = array(
+        '#type' => 'textarea',
+        '#title' => t('Heading Conversions'),
+        '#default_value' => variable_get('devernote_convertheadings', ''),
+        '#description' => t('Convert font sizes to html h tags.'),
+    );
+  }
+
   return system_settings_form($form);
 }

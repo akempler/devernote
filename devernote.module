@@ -16,7 +16,7 @@
  * Set to TRUE if testing the module against sandbox.evernote.com.
  * @var boolean
  */
-define('DEVERNOTE_SANDBOX', FALSE);
+define('DEVERNOTE_SANDBOX', TRUE);
 
 /**
  * Notes in evernote with this tag will be imported.
@@ -162,45 +162,62 @@ function devernote_import_form($form, &$form_state) {
     '#default_value' => variable_get('devernote_nodecomments', 1),
   );
 
+  global $user;
+  $formats = filter_formats($user);
+  $default_format = variable_get('devernote_inputformat', '');
+  if (!$default_format) {
+    $default_format = filter_default_format($user);
+  }
+  $options = array();
+  foreach ($formats as $format) {
+    $options[$format->format] = $format->name;
+  }
+  if (count($options)) {
+    $form['format']['input_format'] = array(
+        '#type' => 'select',
+        '#title' => t('Input Format'),
+        '#options' => $options,
+        '#default_value' => variable_get('devernote_inputformat', $default_format),
+        '#description' => t('Select an input format for the imported note.'),
+    );
+  }
+
   $isloaded = extension_loaded('libxml');
   if ($isloaded) {
-    $form['format'] = array(
-        '#type' => 'fieldset',
-        '#title' => t('Format import'),
-        '#collapsible' => TRUE,
-        '#collapsed' => TRUE,
-        '#group' => 'additional_settings',
-        '#attributes' => array(
-            'class' => array('node-form-options'),
-        ),
+    $form['conversions'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Advanced HTML Conversions:'),
+      '#collapsible' => TRUE,
+      '#collapsed' => FALSE,
+      '#group' => 'html_conversions',
+      '#attributes' => array(
+        'class' => array('node-form-options'),
+      ),
     );
-
-    global $user;
-    $formats = filter_formats($user);
-    $default_format = variable_get('devernote_inputformat', '');
-    if (!$default_format) {
-      $default_format = filter_default_format($user);
-    }
-    $options = array();
-    foreach ($formats as $format) {
-      $options[$format->format] = $format->name;
-    }
-    if (count($options)) {
-      $form['devernote_inputformat'] = array(
-          '#type' => 'select',
-          '#title' => t('Input Format'),
-          '#options' => $options,
-          '#default_value' => $default_format,
-          '#description' => t('Select an input format for the imported note.'),
-      );
-    }
-
-    $form['format']['input_format'] = array(
-      '#type' => 'select',
-      '#title' => t('Input Format'),
-      '#options' => $options,
-      '#default_value' => variable_get('devernote_input_format', 'article'),
-      '#description' => t('The content type to create from the imported note.'),
+    $form['conversions']['div2p'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('Convert divs to p tags'),
+        '#default_value' => variable_get('devernote_div2p', 0),
+        '#description' => t('Check this to convert divs to p tags.'),
+    );
+    $form['conversions']['convertheadings_info'] = array(
+        '#markup' => '<strong>Font size to heading tag conversions</strong><br />
+                    When you set different font sizes in Evernote, it uses the font-size attribute to style the text.
+                    If you prefer to have your html rendered using html h tags instead, you can use the following text area to specify conversions.<br />
+                    Enter font sizes followed by a comma with the corresponding html h tag you want it converted to.
+                    One per line. For example:<br />
+                    11, h5<br />
+                    12, h5<br />
+                    13, h4<br />
+                    With the above settings, when the note gets imported any text wrapped with a &lt;div style="font-size: 11px;"&gt; would get wrapped in an h5 tag instead.<br />
+                    Leave the field blank to use the note html as is.<br />
+                    NOTE: these settings will be ignored if the input format is set to plain text when importing.',
+    );
+    $form['conversions']['convertheadings'] = array(
+        '#type' => 'textarea',
+        '#title' => t('Heading Conversions'),
+        '#default_value' => variable_get('devernote_convertheadings', ''),
+        '#description' => t('Convert font sizes to html h tags.'),
     );
   }
 
@@ -285,6 +302,27 @@ function devernote_import_by_tag() {
                 }
               }
 
+              $cleanup = array();
+              if (isset($_POST['convertheadings'])) {
+                $mappings = explode(PHP_EOL, $_POST['convertheadings']);
+                if (count($mappings)) {
+                  $htags = array();
+                  foreach ($mappings as $mapping) {
+                    $pieces = explode(',', $mapping);
+                    $htags[trim($pieces[0])] = trim($pieces[1]);
+                  }
+                  $cleanup['htags'] = $htags;
+                }
+              }
+              if (isset($_POST['div2p'])) {
+                $cleanup['div2p'] = $_POST['div2p'];
+              }
+              if (count($cleanup)) {
+                //var_dump($cleanup);
+                //die();
+                $body = devernote_cleanup_html($body, $cleanup);
+              }
+
               $info['title'] = $note->getTitle();
               $info['body'] = $body;
               $info['note_guid'] = $note->getGuid();
@@ -293,7 +331,8 @@ function devernote_import_by_tag() {
               $info['promote'] = ($_POST['promote']) ? $_POST['promote'] : NULL;
               $info['comments'] = ($_POST['comments']) ? $_POST['comments'] : NULL;
               global $user;
-              $info['input_format'] = ($_POST['devernote_inputformat']) ? $_POST['devernote_inputformat'] : filter_default_format($user);
+              // TODO use filter_fallback_format() instead???
+              $info['input_format'] = ($_POST['input_format']) ? $_POST['input_format'] : filter_default_format($user);
 
               $nid = _devernote_save_node($info);
               $nodes[] = '<p>' . l($info['title'], 'node/' . $nid) . '</p>';
@@ -436,6 +475,77 @@ function devernote_get_userinfo() {
   }
 
   return $userinfo;
+}
+
+
+/**
+ * Cleanup html retrieved from Evernote.
+ *
+ * For example, convert divs to p tags.
+ * Also map font size attributes to h tags.
+ *
+ * @param string $html
+ *  The html to cleanup.
+ * @param array $cleanup
+ *  An associative array of cleanup options. Can contain:
+ *  - mappings: array of font size => h tag. For example:
+ *    array('11' => 'h4', '12' => 'h3')
+ *  - 'div2p' => TRUE
+ *    If set to TRUE divs will be converted to p tags.
+ *
+ * @return string
+ *  cleaned up/converted html.
+ */
+function devernote_cleanup_html($html, $cleanup) {
+  //$info = var_export($cleanup);
+  //watchdog('devernote', $info);
+  //drupal_set_message('cleanup = '.$info);
+  $htags = isset($cleanup['htags']) && count($cleanup['htags']) ? TRUE : FALSE;
+  $div2p = isset($cleanup['div2p']) ? $cleanup['div2p'] : FALSE;
+
+  if ($htags) {
+    $dom = new DOMDocument();
+    $dom->loadHTML($html);
+    $spans = $dom->getElementsByTagName("span");
+    for ($i = $spans->length - 1; $i >= 0; $i --) {
+      $spannode = $spans->item($i);
+      if ($spannode->hasAttribute('style')) {
+        $attribute = $spannode->getAttribute('style');
+        if (stristr($attribute, 'font-size')) {
+
+          $pattern = '/font-size\s*?:.*?(;|(?=""|\'|;))/';
+          preg_match($pattern, $attribute, $match);
+          $pieces = explode(':', $match[0]);
+          // Trimming for pt and px because I've seen both come out of Evernote.
+          $size = trim($pieces[1], " pt;");
+          $size = trim($size, "px;");
+          //drupal_set_message('looking for size: '.$size);
+          // Lookup the h tag to use.
+          if (array_key_exists($size, $cleanup['htags'])) {
+            $tag = $cleanup['htags'][$size];
+            //drupal_set_message('converting to '.$tag);
+            $hnode = $dom->createElement($tag, $spannode->nodeValue);
+            $spannode->parentNode->replaceChild($hnode, $spannode);
+            $replace[] = $tag;
+          }
+        }
+      }
+    }
+    $html = $dom->saveHTML();
+
+    if(count($replace)) {
+      foreach($replace as $key => $value) {
+        $html = str_replace(array('<div><'.$value.'>', '</'.$value.'></div>'), array('<'.$value.'>', '</'.$value.'>'), $html);
+      }
+    }
+
+    if ($div2p) {
+      $html = str_replace('<div>&nbsp;</div>', '', $html);
+      $html = str_replace(array('<div>', '</div>'), array('<p>', '</p>'), $html);
+    }
+  }
+
+  return $html;
 }
 
 
@@ -598,7 +708,10 @@ function _devernote_save_node($info) {
   $node->uid = $user->uid;
   $node->language = LANGUAGE_NONE;
 
-  $node->body[$node->language][0]['value']   = $info['body'];
+  // TODO test and implement.
+  // Apply all enabeld filters for the selected text format.
+  // $info['body'] = check_markup($info['body'], $info['input_format']);
+  $node->body[$node->language][0]['value'] = $info['body'];
   $node->body[$node->language][0]['summary'] = text_summary($info['body']);
   $node->body[$node->language][0]['format']  = $info['input_format'];
 
