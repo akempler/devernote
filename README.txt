@@ -12,7 +12,14 @@ http://adamkempler.com
   NOTE: this is a two step process. Once you get your api key, 
   you will have to request that it be made available for production use.
   By default it is initially just for use with their sandbox site.
-
+  
+- Install composer:
+  https://getcomposer.org/doc/00-intro.md
+  For easy global insall:
+  CD into your home directory and run:
+  curl -sS https://getcomposer.org/installer | php
+  sudo mv composer.phar /usr/local/bin/composer
+  
 - Install the composer_manager module:
   https://www.drupal.org/project/composer_manager
   

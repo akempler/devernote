@@ -16,7 +16,7 @@
  * Set to TRUE if testing the module against sandbox.evernote.com.
  * @var boolean
  */
-define('DEVERNOTE_SANDBOX', FALSE);
+define('DEVERNOTE_SANDBOX', TRUE);
 
 /**
  * Notes in evernote with this tag will be imported.
@@ -162,6 +162,65 @@ function devernote_import_form($form, &$form_state) {
     '#default_value' => variable_get('devernote_nodecomments', 1),
   );
 
+  global $user;
+  $formats = filter_formats($user);
+  $default_format = variable_get('devernote_inputformat', '');
+  if (!$default_format) {
+    $default_format = filter_default_format($user);
+  }
+  $options = array();
+  foreach ($formats as $format) {
+    $options[$format->format] = $format->name;
+  }
+  if (count($options)) {
+    $form['format']['input_format'] = array(
+      '#type' => 'select',
+      '#title' => t('Input Format'),
+      '#options' => $options,
+      '#default_value' => variable_get('devernote_inputformat', $default_format),
+      '#description' => t('Select an input format for the imported note.'),
+    );
+  }
+
+  $isloaded = extension_loaded('libxml');
+  if ($isloaded) {
+    $form['conversions'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Advanced HTML Conversions:'),
+      '#collapsible' => TRUE,
+      '#collapsed' => FALSE,
+      '#group' => 'html_conversions',
+      '#attributes' => array(
+        'class' => array('node-form-options'),
+      ),
+    );
+    $form['conversions']['div2p'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Convert divs to p tags'),
+      '#default_value' => variable_get('devernote_div2p', 0),
+      '#description' => t('Check this to convert divs to p tags.'),
+    );
+    $form['conversions']['convertheadings_info'] = array(
+      '#markup' => '<strong>Font size to heading tag conversions</strong><br />
+                    When you set different font sizes in Evernote, it uses the font-size attribute to style the text.
+                    If you prefer to have your html rendered using html h tags instead, you can use the following text area to specify conversions.<br />
+                    Enter font sizes followed by a comma with the corresponding html h tag you want it converted to.
+                    One per line. For example:<br />
+                    11, h5<br />
+                    12, h5<br />
+                    13, h4<br />
+                    With the above settings, when the note gets imported any text wrapped with a &lt;div style="font-size: 11px;"&gt; would get wrapped in an h5 tag instead.<br />
+                    Leave the field blank to use the note html as is.<br />
+                    NOTE: these settings will be ignored if the input format is set to plain text when importing.',
+    );
+    $form['conversions']['convertheadings'] = array(
+      '#type' => 'textarea',
+      '#title' => t('Heading Conversions'),
+      '#default_value' => variable_get('devernote_convertheadings', ''),
+      '#description' => t('Convert font sizes to html h tags.'),
+    );
+  }
+
   $form['#submit'][] = 'devernote_import_form_submit';
 
   $form['submit'] = array(
@@ -243,13 +302,35 @@ function devernote_import_by_tag() {
                 }
               }
 
+              $cleanup = array();
+              if (isset($_POST['convertheadings'])) {
+                $mappings = explode(PHP_EOL, $_POST['convertheadings']);
+                if (count($mappings)) {
+                  $htags = array();
+                  foreach ($mappings as $mapping) {
+                    $pieces = explode(',', $mapping);
+                    $htags[trim($pieces[0])] = trim($pieces[1]);
+                  }
+                  $cleanup['htags'] = $htags;
+                }
+              }
+              if (isset($_POST['div2p'])) {
+                $cleanup['div2p'] = $_POST['div2p'];
+              }
+              if (count($cleanup)) {
+                $body = devernote_cleanup_html($body, $cleanup);
+              }
+
               $info['title'] = $note->getTitle();
               $info['body'] = $body;
               $info['note_guid'] = $note->getGuid();
               $info['node_type'] = $_POST['devernote_import_type'];
-              $info['status'] = $_POST['status'] ? $_POST['status'] : NULL;
-              $info['promote'] = $_POST['promote'] ? $_POST['promote'] : NULL;
-              $info['comments'] = $_POST['comments'] ? $_POST['comments'] : NULL;
+              $info['status'] = ($_POST['status']) ? $_POST['status'] : NULL;
+              $info['promote'] = ($_POST['promote']) ? $_POST['promote'] : NULL;
+              $info['comments'] = ($_POST['comments']) ? $_POST['comments'] : NULL;
+              global $user;
+              // TODO use filter_fallback_format() instead???
+              $info['input_format'] = ($_POST['input_format']) ? $_POST['input_format'] : filter_default_format($user);
 
               $nid = _devernote_save_node($info);
               $nodes[] = '<p>' . l($info['title'], 'node/' . $nid) . '</p>';
@@ -396,6 +477,101 @@ function devernote_get_userinfo() {
 
 
 /**
+ * Cleanup html retrieved from Evernote.
+ *
+ * For example, convert divs to p tags.
+ * Also map font size attributes to h tags.
+ *
+ * @param string $html
+ *  The html to cleanup.
+ * @param array $cleanup
+ *   An associative array of cleanup options. Can contain:
+ *   - mappings: array of font size => h tag. For example:
+ *     array('11' => 'h4', '12' => 'h3')
+ *   - 'div2p' => TRUE
+ *     If set to TRUE divs will be converted to p tags.
+ *
+ * @return string
+ *   cleaned up/converted html.
+ */
+function devernote_cleanup_html($html, $cleanup) {
+
+  $htags = isset($cleanup['htags']) && count($cleanup['htags']) ? TRUE : FALSE;
+  $div2p = isset($cleanup['div2p']) ? TRUE : FALSE;
+
+  // Replace spans with a font-size with an h tag
+  // based on the mappings provided in $cleanup['htags'].
+  if ($htags) {
+    $dom = new DOMDocument();
+    $dom->loadHTML($html);
+    $spans = $dom->getElementsByTagName("span");
+    $replacements = array();
+    for ($i = $spans->length - 1; $i >= 0; $i--) {
+      $spannode = $spans->item($i);
+      if ($spannode->hasAttribute('style')) {
+        $attribute = $spannode->getAttribute('style');
+        if (stristr($attribute, 'font-size')) {
+
+          $pattern = '/font-size\s*?:.*?(;|(?=""|\'|;))/';
+          preg_match($pattern, $attribute, $match);
+          $pieces = explode(':', $match[0]);
+          // Trimming for pt and px because I've seen both come out of Evernote.
+          $size = trim($pieces[1], " pt;");
+          $size = trim($size, "px;");
+
+          // Lookup the h tag to use.
+          if (array_key_exists($size, $cleanup['htags'])) {
+            $htag = $cleanup['htags'][$size];
+            $hnode = $dom->createElement($htag, $spannode->nodeValue);
+            $spannode->parentNode->replaceChild($hnode, $spannode);
+
+            $lineage = array();
+            $lineage[] = $htag;
+
+            $parent1 = $hnode->parentNode->nodeName;
+            $lineage[] = $parent1;
+            $index = $htag . $parent1;
+
+            if ($parent1 != 'div') {
+              $parent2 = $hnode->parentNode->parentNode->nodeName;
+              $index .= $parent2;
+              $lineage[] = $parent2;
+            }
+            $replacements[$index] = $lineage;
+          }
+        }
+      }
+    }
+    $html = $dom->saveHTML();
+
+    if (count($replacements)) {
+      foreach ($replacements as $key => $tags) {
+        $begin = '';
+        $end = '';
+        $htag = $tags[0];
+        foreach ($tags as $tag) {
+          $end .= '</' . $tag . '>';
+        }
+        $tags = array_reverse($tags);
+        foreach ($tags as $tag) {
+          $begin .= '<' . $tag . '>';
+        }
+        $html = str_replace(array($begin, $end), array('<' . $htag . '>', '</' . $htag . '>'), $html);
+      }
+    }
+
+    if ($div2p) {
+      $html = str_replace('<div><br clear="none"></div>', '', $html);
+      $html = str_replace(array('<div>', '</div>'), array('<p>', '</p>'), $html);
+      $html = str_replace('<br clear="none">', '', $html);
+    }
+  }
+
+  return $html;
+}
+
+
+/**
  * Check if there are new or updated notes since the last check.
  *
  * Saves the new syncstate to the database.
@@ -538,7 +714,7 @@ function _devernote_save_userinfo($userinfo) {
  *   'status' - the publishing status. Defaults to 0, unpublished.
  *   'comment' - 0 = comments disabled, 1 = read only (default), 2 = read/write.
  *   'promote' - Promoted to the front page or not. Defaults to 1.
- *   'format' - plain_text, filtered_html, full_html (default).
+ *   'input_format' - plain_text, filtered_html, full_html, etc.
  *    You can set the defaults for status, comment, format, and promote on the
  *    module's configuration page.
  */
@@ -554,9 +730,12 @@ function _devernote_save_node($info) {
   $node->uid = $user->uid;
   $node->language = LANGUAGE_NONE;
 
-  $node->body[$node->language][0]['value']   = $info['body'];
+  // TODO test and implement.
+  // Apply all enabeld filters for the selected text format.
+  // $info['body'] = check_markup($info['body'], $info['input_format']);
+  $node->body[$node->language][0]['value'] = $info['body'];
   $node->body[$node->language][0]['summary'] = text_summary($info['body']);
-  $node->body[$node->language][0]['format']  = 'full_html';
+  $node->body[$node->language][0]['format']  = $info['input_format'];
 
   $node->status = isset($info['status']) ? $info['status'] : variable_get('devernote_nodestatus', 0);
   $node->comment = isset($info['comment']) ? $info['comment'] : variable_get('devernote_nodecomments', 1);
