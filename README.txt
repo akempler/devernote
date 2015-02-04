@@ -41,6 +41,7 @@ http://adamkempler.com
 - Import notes on the /devernote_import page.
   Notes tagged in Evernote with the specified tag will be imported. 
   Embedded images will also be imported.
+  NOTE: setting the input format to Full Html works best.
   
 - You can specify an imagecache style to apply to images that are imported 
   with notes. This can be done on the /admin/config/content/devernote page.

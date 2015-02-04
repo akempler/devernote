@@ -7,4 +7,4 @@ recommends[] = aes
 
 package = xeego
 
-version = "7.x-1.0"
+version = "7.x-1.1"
