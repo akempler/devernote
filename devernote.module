@@ -174,11 +174,11 @@ function devernote_import_form($form, &$form_state) {
   }
   if (count($options)) {
     $form['format']['input_format'] = array(
-        '#type' => 'select',
-        '#title' => t('Input Format'),
-        '#options' => $options,
-        '#default_value' => variable_get('devernote_inputformat', $default_format),
-        '#description' => t('Select an input format for the imported note.'),
+      '#type' => 'select',
+      '#title' => t('Input Format'),
+      '#options' => $options,
+      '#default_value' => variable_get('devernote_inputformat', $default_format),
+      '#description' => t('Select an input format for the imported note.'),
     );
   }
 
@@ -195,13 +195,13 @@ function devernote_import_form($form, &$form_state) {
       ),
     );
     $form['conversions']['div2p'] = array(
-        '#type' => 'checkbox',
-        '#title' => t('Convert divs to p tags'),
-        '#default_value' => variable_get('devernote_div2p', 0),
-        '#description' => t('Check this to convert divs to p tags.'),
+      '#type' => 'checkbox',
+      '#title' => t('Convert divs to p tags'),
+      '#default_value' => variable_get('devernote_div2p', 0),
+      '#description' => t('Check this to convert divs to p tags.'),
     );
     $form['conversions']['convertheadings_info'] = array(
-        '#markup' => '<strong>Font size to heading tag conversions</strong><br />
+      '#markup' => '<strong>Font size to heading tag conversions</strong><br />
                     When you set different font sizes in Evernote, it uses the font-size attribute to style the text.
                     If you prefer to have your html rendered using html h tags instead, you can use the following text area to specify conversions.<br />
                     Enter font sizes followed by a comma with the corresponding html h tag you want it converted to.
@@ -214,10 +214,10 @@ function devernote_import_form($form, &$form_state) {
                     NOTE: these settings will be ignored if the input format is set to plain text when importing.',
     );
     $form['conversions']['convertheadings'] = array(
-        '#type' => 'textarea',
-        '#title' => t('Heading Conversions'),
-        '#default_value' => variable_get('devernote_convertheadings', ''),
-        '#description' => t('Convert font sizes to html h tags.'),
+      '#type' => 'textarea',
+      '#title' => t('Heading Conversions'),
+      '#default_value' => variable_get('devernote_convertheadings', ''),
+      '#description' => t('Convert font sizes to html h tags.'),
     );
   }
 
@@ -318,8 +318,6 @@ function devernote_import_by_tag() {
                 $cleanup['div2p'] = $_POST['div2p'];
               }
               if (count($cleanup)) {
-                //var_dump($cleanup);
-                //die();
                 $body = devernote_cleanup_html($body, $cleanup);
               }
 
@@ -487,27 +485,28 @@ function devernote_get_userinfo() {
  * @param string $html
  *  The html to cleanup.
  * @param array $cleanup
- *  An associative array of cleanup options. Can contain:
- *  - mappings: array of font size => h tag. For example:
- *    array('11' => 'h4', '12' => 'h3')
- *  - 'div2p' => TRUE
- *    If set to TRUE divs will be converted to p tags.
+ *   An associative array of cleanup options. Can contain:
+ *   - mappings: array of font size => h tag. For example:
+ *     array('11' => 'h4', '12' => 'h3')
+ *   - 'div2p' => TRUE
+ *     If set to TRUE divs will be converted to p tags.
  *
  * @return string
- *  cleaned up/converted html.
+ *   cleaned up/converted html.
  */
 function devernote_cleanup_html($html, $cleanup) {
-  //$info = var_export($cleanup);
-  //watchdog('devernote', $info);
-  //drupal_set_message('cleanup = '.$info);
-  $htags = isset($cleanup['htags']) && count($cleanup['htags']) ? TRUE : FALSE;
-  $div2p = isset($cleanup['div2p']) ? $cleanup['div2p'] : FALSE;
 
+  $htags = isset($cleanup['htags']) && count($cleanup['htags']) ? TRUE : FALSE;
+  $div2p = isset($cleanup['div2p']) ? TRUE : FALSE;
+
+  // Replace spans with a font-size with an h tag
+  // based on the mappings provided in $cleanup['htags'].
   if ($htags) {
     $dom = new DOMDocument();
     $dom->loadHTML($html);
     $spans = $dom->getElementsByTagName("span");
-    for ($i = $spans->length - 1; $i >= 0; $i --) {
+    $replacements = array();
+    for ($i = $spans->length - 1; $i >= 0; $i--) {
       $spannode = $spans->item($i);
       if ($spannode->hasAttribute('style')) {
         $attribute = $spannode->getAttribute('style');
@@ -519,29 +518,52 @@ function devernote_cleanup_html($html, $cleanup) {
           // Trimming for pt and px because I've seen both come out of Evernote.
           $size = trim($pieces[1], " pt;");
           $size = trim($size, "px;");
-          //drupal_set_message('looking for size: '.$size);
+
           // Lookup the h tag to use.
           if (array_key_exists($size, $cleanup['htags'])) {
-            $tag = $cleanup['htags'][$size];
-            //drupal_set_message('converting to '.$tag);
-            $hnode = $dom->createElement($tag, $spannode->nodeValue);
+            $htag = $cleanup['htags'][$size];
+            $hnode = $dom->createElement($htag, $spannode->nodeValue);
             $spannode->parentNode->replaceChild($hnode, $spannode);
-            $replace[] = $tag;
+
+            $lineage = array();
+            $lineage[] = $htag;
+
+            $parent1 = $hnode->parentNode->nodeName;
+            $lineage[] = $parent1;
+            $index = $htag . $parent1;
+
+            if ($parent1 != 'div') {
+              $parent2 = $hnode->parentNode->parentNode->nodeName;
+              $index .= $parent2;
+              $lineage[] = $parent2;
+            }
+            $replacements[$index] = $lineage;
           }
         }
       }
     }
     $html = $dom->saveHTML();
 
-    if(count($replace)) {
-      foreach($replace as $key => $value) {
-        $html = str_replace(array('<div><'.$value.'>', '</'.$value.'></div>'), array('<'.$value.'>', '</'.$value.'>'), $html);
+    if (count($replacements)) {
+      foreach ($replacements as $key => $tags) {
+        $begin = '';
+        $end = '';
+        $htag = $tags[0];
+        foreach ($tags as $tag) {
+          $end .= '</' . $tag . '>';
+        }
+        $tags = array_reverse($tags);
+        foreach ($tags as $tag) {
+          $begin .= '<' . $tag . '>';
+        }
+        $html = str_replace(array($begin, $end), array('<' . $htag . '>', '</' . $htag . '>'), $html);
       }
     }
 
     if ($div2p) {
-      $html = str_replace('<div>&nbsp;</div>', '', $html);
+      $html = str_replace('<div><br clear="none"></div>', '', $html);
       $html = str_replace(array('<div>', '</div>'), array('<p>', '</p>'), $html);
+      $html = str_replace('<br clear="none">', '', $html);
     }
   }
 
