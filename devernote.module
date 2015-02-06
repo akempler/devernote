@@ -16,7 +16,7 @@
  * Set to TRUE if testing the module against sandbox.evernote.com.
  * @var boolean
  */
-define('DEVERNOTE_SANDBOX', TRUE);
+define('DEVERNOTE_SANDBOX', FALSE);
 
 /**
  * Notes in evernote with this tag will be imported.
