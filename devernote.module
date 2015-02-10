@@ -250,6 +250,10 @@ function devernote_import_by_tag() {
 
   // TODO handle no $userinfo.
   $userinfo = devernote_get_userinfo();
+  if(!$userinfo) {
+    // TODO This is just a placeholder. Replace with better error handling.
+    return "There was an error authorizing with Evernote.";
+  }
   $client = new \Evernote\Client($userinfo['oauth_token'], DEVERNOTE_SANDBOX);
 
   if (isset($_POST['form_id']) && $_POST['form_id'] == 'devernote_import_form') {
@@ -325,12 +329,12 @@ function devernote_import_by_tag() {
               $info['body'] = $body;
               $info['note_guid'] = $note->getGuid();
               $info['node_type'] = $_POST['devernote_import_type'];
-              $info['status'] = ($_POST['status']) ? $_POST['status'] : NULL;
-              $info['promote'] = ($_POST['promote']) ? $_POST['promote'] : NULL;
-              $info['comments'] = ($_POST['comments']) ? $_POST['comments'] : NULL;
+              $info['status'] = isset($_POST['status']) ? $_POST['status'] : NULL;
+              $info['promote'] = isset($_POST['promote']) ? $_POST['promote'] : NULL;
+              $info['comments'] = isset($_POST['comments']) ? $_POST['comments'] : NULL;
               global $user;
               // TODO use filter_fallback_format() instead???
-              $info['input_format'] = ($_POST['input_format']) ? $_POST['input_format'] : filter_default_format($user);
+              $info['input_format'] = isset($_POST['input_format']) ? $_POST['input_format'] : filter_default_format($user);
 
               $nid = _devernote_save_node($info);
               $nodes[] = '<p>' . l($info['title'], 'node/' . $nid) . '</p>';
@@ -440,18 +444,26 @@ function devernote_get_userinfo() {
   $userinfo = db_query($sql, array(':uid' => $user->uid))->fetchAssoc();
 
   if ($userinfo) {
-    // Check if the saved auth token has expired.
-    $edam_expires = $userinfo['edam_expires'];
-    if ((time() - (60 * 60 * 24)) < $edam_expires) {
-      $notestoreurl = $userinfo['edam_noteStoreUrl'];
+    // Check if the DEVERNOTE_SANDBOX was changed
+    // after already saving the edam_noteStoreUrl.
+    $url = isset($userinfo['edam_noteStoreUrl']) ? $userinfo['edam_noteStoreUrl'] : '';
+    $sandboxurl = strstr($url, 'sandbox') ? TRUE : FALSE;
+    if ($sandboxurl === DEVERNOTE_SANDBOX) {
+      // Check if the saved auth token has expired.
+      $edam_expires = $userinfo['edam_expires'];
+      if ((time() - (60 * 60 * 24)) < $edam_expires) {
+        $notestoreurl = $userinfo['edam_noteStoreUrl'];
 
-      $enc_method = variable_get('devernote_enc_method', '');
-      if (($enc_method) && $enc_method == 'aes') {
-        $userinfo['oauth_token'] = aes_decrypt($userinfo['oauth_token']);
+        $enc_method = variable_get('devernote_enc_method', '');
+        if (($enc_method) && $enc_method == 'aes') {
+          $userinfo['oauth_token'] = aes_decrypt($userinfo['oauth_token']);
+        }
+        elseif (($enc_method) && $enc_method == 'encrypt') {
+          $userinfo['oauth_token'] = decrypt($userinfo['oauth_token']);
+        }
       }
-      elseif (($enc_method) && $enc_method == 'encrypt') {
-        $userinfo['oauth_token'] = decrypt($userinfo['oauth_token']);
-      }
+    } else {
+      $userinfo = array();
     }
   }
 
@@ -499,7 +511,7 @@ function devernote_cleanup_html($html, $cleanup) {
   $htags = isset($cleanup['htags']) && count($cleanup['htags']) ? TRUE : FALSE;
   $div2p = isset($cleanup['div2p']) ? TRUE : FALSE;
 
-  // Replace spans with a font-size with an h tag
+  // Replace spans containing a font-size with an h tag
   // based on the mappings provided in $cleanup['htags'].
   if ($htags) {
     $dom = new DOMDocument();
@@ -519,12 +531,18 @@ function devernote_cleanup_html($html, $cleanup) {
           $size = trim($pieces[1], " pt;");
           $size = trim($size, "px;");
 
-          // Lookup the h tag to use.
+          // Lookup the h tag to use in place of the font-size.
           if (array_key_exists($size, $cleanup['htags'])) {
             $htag = $cleanup['htags'][$size];
             $hnode = $dom->createElement($htag, $spannode->nodeValue);
             $spannode->parentNode->replaceChild($hnode, $spannode);
 
+            // We now create a trail of tags from the  h tag to the parent div
+            // So that we can do a str_replace.
+            // For example we might have something like: <div><em><h3>
+            // (where the h3 replaced a span tag).
+            // The goal here is to get rid of the div and em tags now that
+            // we have the h3 tag in place of the span.
             $lineage = array();
             $lineage[] = $htag;
 
@@ -542,8 +560,35 @@ function devernote_cleanup_html($html, $cleanup) {
         }
       }
     }
+
+    // Now we look for divs with font-size because Evernote is not consistent.
+    $divs = $dom->getElementsByTagName("div");
+    for ($i = $divs->length - 1; $i >= 0; $i--) {
+      $divnode = $divs->item($i);
+      if ($divnode->hasAttribute('style')) {
+        $attribute = $divnode->getAttribute('style');
+        if (stristr($attribute, 'font-size')) {
+          $pattern = '/font-size\s*?:.*?(;|(?=""|\'|;))/';
+          preg_match($pattern, $attribute, $match);
+          $pieces = explode(':', $match[0]);
+          // Trimming for pt and px because I've seen both come out of Evernote.
+          $size = trim($pieces[1], " pt;");
+          $size = trim($size, "px;");
+          if (array_key_exists($size, $cleanup['htags'])) {
+            $htag = $cleanup['htags'][$size];
+          }
+          else {
+            $htag = 'h5';
+          }
+          $hnode = $dom->createElement($htag, $divnode->nodeValue);
+          $divnode->parentNode->replaceChild($hnode, $divnode);
+        }
+      }
+    }
+
     $html = $dom->saveHTML();
 
+    // Run the replacements defined when converting spans to h3 tags.
     if (count($replacements)) {
       foreach ($replacements as $key => $tags) {
         $begin = '';
@@ -561,7 +606,10 @@ function devernote_cleanup_html($html, $cleanup) {
     }
 
     if ($div2p) {
+      $html = str_replace('<div>&nbsp;</div>', '', $html);
       $html = str_replace('<div><br clear="none"></div>', '', $html);
+      $html = str_replace('<div><br></div>', '', $html);
+      $html = str_replace('<div><br/></div>', '', $html);
       $html = str_replace(array('<div>', '</div>'), array('<p>', '</p>'), $html);
       $html = str_replace('<br clear="none">', '', $html);
     }
@@ -639,6 +687,9 @@ function _devernote_auth() {
   $oauth_handler = new \Evernote\Auth\OauthHandler(DEVERNOTE_SANDBOX);
   $key = variable_get('devernote_consumer_key', '');
   $secret = variable_get('devernote_secret_key', '');
+  if (!$secret) {
+    return FALSE;
+  }
 
   global $base_url;
   $callback = $base_url . request_uri();
