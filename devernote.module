@@ -243,20 +243,25 @@ function devernote_import_form_submit($form, &$form_state) {
  *
  * @return string
  *   The html to display.
+ *
+ * @todo separate out the evernote api stuff.
  */
 function devernote_import_by_tag() {
 
+  $submitted = FALSE;
+
   composer_manager_register_autoloader();
 
-  // TODO handle no $userinfo.
   $userinfo = devernote_get_userinfo();
+
   if(!$userinfo) {
     // TODO This is just a placeholder. Replace with better error handling.
     return "There was an error authorizing with Evernote.";
   }
+
   $client = new \Evernote\Client($userinfo['oauth_token'], DEVERNOTE_SANDBOX);
 
-  if (isset($_POST['form_id']) && $_POST['form_id'] == 'devernote_import_form') {
+  if (isset($_POST['form_id']) && $_POST['form_id'] == 'devernote_import_form' && $submitted == FALSE) {
 
     $out = '';
 
@@ -307,7 +312,7 @@ function devernote_import_by_tag() {
               }
 
               $cleanup = array();
-              if (isset($_POST['convertheadings'])) {
+              if (isset($_POST['convertheadings']) && !empty($_POST['convertheadings'])) {
                 $mappings = explode(PHP_EOL, $_POST['convertheadings']);
                 if (count($mappings)) {
                   $htags = array();
@@ -356,6 +361,9 @@ function devernote_import_by_tag() {
     }
     else {
       $out .= '<h3>There are no new or updated notes since your last import</h3>';
+    }
+    if ($out) {
+      $submitted = TRUE;
     }
   }
   else {
@@ -443,7 +451,7 @@ function devernote_get_userinfo() {
           WHERE uid = :uid";
   $userinfo = db_query($sql, array(':uid' => $user->uid))->fetchAssoc();
 
-  if ($userinfo) {
+  if (isset($userinfo['oauth_token']) && (strval($userinfo['oauth_token']) != '0')) {
     // Check if the DEVERNOTE_SANDBOX was changed
     // after already saving the edam_noteStoreUrl.
     $url = isset($userinfo['edam_noteStoreUrl']) ? $userinfo['edam_noteStoreUrl'] : '';
@@ -461,6 +469,16 @@ function devernote_get_userinfo() {
         elseif (($enc_method) && $enc_method == 'encrypt') {
           $userinfo['oauth_token'] = decrypt($userinfo['oauth_token']);
         }
+      } else {
+        // The token has expired.
+        db_update('devernote_user')
+        ->fields(array(
+            'oauth_token' => 0,
+            'expires' => 0,
+        ))
+        ->condition('uid', $user->uid)
+        ->execute();
+        $userinfo['oauth_token'] = '';
       }
     } else {
       $userinfo = array();
@@ -468,7 +486,8 @@ function devernote_get_userinfo() {
   }
 
   // We either did not have an existing record for the user or it expired.
-  if (!isset($userinfo['oauth_token'])) {
+  if (!isset($userinfo['oauth_token']) || $userinfo['oauth_token'] === 0) {
+
     $oauth_data = _devernote_auth();
     if ($oauth_data) {
       $oauth_data['tag'] = isset($userinfo['tag']) ? $userinfo['tag'] : DEVERNOTE_DEFAULT_TAG;
