@@ -10,7 +10,6 @@
  * @author: Adam Kempler <akempler@gmail.com>
  */
 
-// use GuzzleHttp\Stream;
 
 /**
  * Set to TRUE if testing the module against sandbox.evernote.com.
@@ -80,27 +79,9 @@ function devernote_permission() {
 function devernote_node_delete($node) {
 
   db_delete('devernote_notes')->condition('nid', $node->nid)->execute();
-}
 
-
-/**
- * Check if a note was already imported.
- *
- * @param string $note_guid
- *   The unique guid for the Evernote note.
- *
- * @return int
- *   {node}.nid of the imported note if it exists. Otherwise FALSE.
- */
-function devernote_check_imported($note_guid) {
-
-  $nid = db_select('devernote_notes')
-  ->fields('devernote_notes', array('nid'))
-  ->condition('note_guid', $note_guid, '=')
-  ->execute()
-  ->fetchField();
-
-  return $nid;
+  // Reset the updates field otherwise syncstate will say there are no new notes.
+  update_user_updates(0);
 }
 
 
@@ -111,11 +92,11 @@ function devernote_import_form($form, &$form_state) {
 
   $userinfo = $form_state['build_info']['args'][0];
 
-  $import_tag = isset($userinfo['tag']) ? $userinfo['tag'] : variable_get('devernote_import_tag', DEVERNOTE_DEFAULT_TAG);
+  // $import_tag = isset($userinfo['tag']) ? $userinfo['tag'] : variable_get('devernote_import_tag', DEVERNOTE_DEFAULT_TAG);
   $form['devernote_import_tag'] = array(
     '#type' => 'textfield',
     '#title' => t('Import tag'),
-    '#default_value' => $import_tag,
+    '#default_value' => variable_get('devernote_import_tag', DEVERNOTE_DEFAULT_TAG),
     '#description' => t('Notes with this tag name will be imported.'),
   );
 
@@ -203,19 +184,22 @@ function devernote_import_form($form, &$form_state) {
     $form['conversions']['convertheadings_info'] = array(
       '#markup' => '<strong>Font size to heading tag conversions</strong><br />
                     When you set different font sizes in Evernote, it uses the font-size attribute to style the text.
-                    If you prefer to have your html rendered using html h tags instead, you can use the following text area to specify conversions.<br />
-                    Enter font sizes followed by a comma with the corresponding html h tag you want it converted to.
+                    If you prefer to have your html rendered using html H tags instead, you can use the following text area
+                    to specify conversions.<br />
+                    Unfortunately you will not know what sizes Evernote will assign until you import it at least once.
+                    You can then view the source and see what sizes it used. Then delete the node and import again.<br />
+                    Enter font sizes followed by a comma with the corresponding html H tag you want it converted to.
                     One per line. For example:<br />
-                    11, h5<br />
-                    12, h5<br />
-                    13, h4<br />
+                    14, h5<br />
+                    15, h5<br />
+                    16, h4<br />
                     With the above settings, when the note gets imported any text wrapped with a &lt;div style="font-size: 11px;"&gt; would get wrapped in an h5 tag instead.<br />
                     Leave the field blank to use the note html as is.<br />
                     NOTE: these settings will be ignored if the input format is set to plain text when importing.',
     );
     $form['conversions']['convertheadings'] = array(
       '#type' => 'textarea',
-      '#title' => t('Heading Conversions'),
+      '#title' => t('H Tag Conversions:'),
       '#default_value' => variable_get('devernote_convertheadings', ''),
       '#description' => t('Convert font sizes to html h tags.'),
     );
@@ -244,133 +228,58 @@ function devernote_import_form_submit($form, &$form_state) {
  * @return string
  *   The html to display.
  *
- * @todo separate out the evernote api stuff.
+ * @todo Move output to template.
  */
 function devernote_import_by_tag() {
 
-  $submitted = FALSE;
-
   composer_manager_register_autoloader();
+  $Devernote = new Devernote();
+  $out = '';
 
-  $userinfo = devernote_get_userinfo();
+  if (isset($_POST['form_id']) && $_POST['form_id'] == 'devernote_import_form') {
 
-  if(!$userinfo) {
-    // TODO This is just a placeholder. Replace with better error handling.
-    return "There was an error authorizing with Evernote.";
-  }
-
-  $client = new \Evernote\Client($userinfo['oauth_token'], DEVERNOTE_SANDBOX);
-
-  if (isset($_POST['form_id']) && $_POST['form_id'] == 'devernote_import_form' && $submitted == FALSE) {
-
-    $out = '';
-
-    $updates = _devernote_syncstate($client, $userinfo['updates']);
-
-    // There are new or updated notes...
+    // Check if there have been any updated or new content since the last check.
+    $updates = $Devernote->evernote_syncstate();
     if ($updates) {
-
       $tag_name = isset($_POST['devernote_import_tag']) ? $_POST['devernote_import_tag'] : DEVERNOTE_DEFAULT_TAG;
-      $tag_guid = (isset($userinfo['tag_guid']) && $userinfo['tag_guid'] > 0) ? $userinfo['tag_guid'] : devernote_get_tag_guid($client, $tag_name);
-
+      $tag_guid = $Devernote->get_tag_guid($tag_name);
       if ($tag_guid) {
-        $filter = new \EDAM\NoteStore\NoteFilter();
-        $filter->tagGuids  = array($tag_guid);
 
-        $resultSpec = new \EDAM\NoteStore\NotesMetadataResultSpec();
-        $notesMetadataList = $client->getUserNotestore()->findNotesMetadata($userinfo['oauth_token'], $filter, 0, 100, $resultSpec);
+        global $user;
+        $node_settings = array();
+        $node_settings['node_type'] = $_POST['devernote_import_type'];
+        $node_settings['status'] = isset($_POST['status']) ? $_POST['status'] : variable_get('devernote_nodestatus', 0);
+        $node_settings['promote'] = isset($_POST['promote']) ? $_POST['promote'] : variable_get('devernote_nodepromoted', 0);
+        $comments = isset($_POST['comments']) ? $_POST['comments'] : variable_get('devernote_nodecomments', 0);
+        $node_settings['comments'] = $comments === 0 ? 0 : 2;
+        // TODO use filter_fallback_format()?
+        $node_settings['input_format'] = isset($_POST['input_format']) ? $_POST['input_format'] : filter_default_format($user);
 
-        $imported = FALSE;
-        if (count($notesMetadataList->notes)) {
-          $nodes = array();
-          foreach ($notesMetadataList->notes as $noteMetadata) {
+        $conversions = get_conversions();
 
-            $nid = devernote_check_imported($noteMetadata->guid);
-            // Only import the node if we haven't already imported it.
-            if (!$nid) {
-              $imported = TRUE;
-              $note = $client->getNote($noteMetadata->guid);
+        $notes = $Devernote->retrieve_tagged_notes($tag_guid, $conversions, $node_settings);
 
-              $body = $note->content->toHtml();
-
-              $resources = $note->getResources();
-              if (count($resources)) {
-                foreach ($resources as $resource) {
-                  $fileinfo = _devernote_save_resource($resource, $userinfo['edam_noteStoreUrl'], $userinfo['oauth_token']);
-                  if (($fileinfo) && isset($fileinfo['extension'])) {
-                    $replace = '/images/' . $fileinfo['filename_md5'] . '.' . $fileinfo['extension'];
-                    if (isset($fileinfo['path_imagestyle'])) {
-                      $url = $fileinfo['path_imagestyle'];
-                    }
-                    else {
-                      $path = file_stream_wrapper_get_instance_by_uri('public://')->getDirectoryPath() . DIRECTORY_SEPARATOR . 'devernote' . DIRECTORY_SEPARATOR . $fileinfo['filename'];
-                      $url = file_create_url($path);
-                    }
-                    $body = str_ireplace($replace, $url, $body);
-                  }
-                }
-              }
-
-              $cleanup = array();
-              if (isset($_POST['convertheadings']) && !empty($_POST['convertheadings'])) {
-                $mappings = explode(PHP_EOL, $_POST['convertheadings']);
-                if (count($mappings)) {
-                  $htags = array();
-                  foreach ($mappings as $mapping) {
-                    $pieces = explode(',', $mapping);
-                    $htags[trim($pieces[0])] = trim($pieces[1]);
-                  }
-                  $cleanup['htags'] = $htags;
-                }
-              }
-              if (isset($_POST['div2p'])) {
-                $cleanup['div2p'] = $_POST['div2p'];
-              }
-              if (count($cleanup)) {
-                $body = devernote_cleanup_html($body, $cleanup);
-              }
-
-              $info['title'] = $note->getTitle();
-              $info['body'] = $body;
-              $info['note_guid'] = $note->getGuid();
-              $info['node_type'] = $_POST['devernote_import_type'];
-              $info['status'] = isset($_POST['status']) ? $_POST['status'] : NULL;
-              $info['promote'] = isset($_POST['promote']) ? $_POST['promote'] : NULL;
-              $info['comments'] = isset($_POST['comments']) ? $_POST['comments'] : NULL;
-              global $user;
-              // TODO use filter_fallback_format() instead???
-              $info['input_format'] = isset($_POST['input_format']) ? $_POST['input_format'] : filter_default_format($user);
-
-              $nid = _devernote_save_node($info);
-              $nodes[] = '<p>' . l($info['title'], 'node/' . $nid) . '</p>';
-            }
-          }
-        }
-        if ($imported) {
+        if (count($notes)) {
           $out .= '<h3>The following notes were imported from Evernote:</h3>';
-          $out .= implode('', $nodes);
+          $out .= implode('', $notes);
+        } else {
+          $out = '<h3>There seems to have been an unknown problem importing the notes.</h3>';
         }
-        else {
-          $out .= '<p>No new notes tagged for importing.</p>';
-        }
-        $out .= '<p><em>To re-import an already imported note, delete the corresponding imported item.</em></p>';
+
+      // The supplied tag wasn't found in evernote.
+      } else {
+        $out = t("No matching tags in Evernote found that match: @tagname", array('@tagname' => $tag_name));
       }
-      else {
-        $out .= '<p>No notes are Tagged with: ' . check_plain($tag_name) . '</p>';
-      }
+    // Update count in evernote hasn't changed since last check.
+    } else {
+      $out = t('There are no new notes tagged for import.');
     }
-    else {
-      $out .= '<h3>There are no new or updated notes since your last import</h3>';
-    }
-    if ($out) {
-      $submitted = TRUE;
-    }
-  }
-  else {
+  // Form hasn't been submitted yet.
+  } else {
 
     $out = '<h3>Import Notes</h3>';
 
-    $form = drupal_get_form('devernote_import_form', $userinfo);
+    $form = drupal_get_form('devernote_import_form', $Devernote->userinfo);
     $out .= drupal_render($form);
   }
 
@@ -379,449 +288,32 @@ function devernote_import_by_tag() {
 
 
 /**
- * Get the evernote guid for a specified tag name.
- *
- * @param string $tag_name
- *   The name of the tag.
- *
- * @return string
- *   The tag_guid or FALSE if none found.
- */
-function devernote_get_tag_guid($client, $tag_name) {
-
-  $notestore = $client->getUserNotestore();
-  $token = $client->getToken();
-  $tags = $notestore->listTags($token);
-
-  $tag_guid = FALSE;
-  if (count($tags)) {
-
-    foreach ($tags as $tag) {
-      if ($tag->name == DEVERNOTE_DEFAULT_TAG) {
-        global $user;
-        $tag_guid = $tag->guid;
-
-        $num_updated = db_update('devernote_user')
-        ->fields(array(
-            'tag_guid' => $tag_guid,
-        ))
-        ->condition('uid', $user->uid)
-        ->execute();
-
-        return $tag_guid;
-      }
-    }
-  }
-
-  return $tag_guid;
-}
-
-
-/**
- * Retrieve saved authentication information for the current logged in user.
- *
- * If none is found, the user will be redirected to Evernote to authenticate
- * and authorize the app.
+ * Used to convert the conversions entered in the
+ * 'devernote_import_form' form. It converts them to an array
+ * usable by $Devernote->retrieve_tagged_notes().
  *
  * @return array
- *   'oauth_token' => 'S=s1:U=802ed:E=1513e335e74:C=14ae6822eb8:P=185:A=jsmith-9647:V=2:H=94efbf7661da4dda35246ae3e6e228ea';
- *   'edam_noteStoreUrl' => 'https://sandbox.evernote.com/shard/s1/notestore'
- *   'edam_expires' => '1452742499940'
- *   'updates' => '25'
- *   'tag' => 'drupalimport'
- *   'tag_guid' => 'e669c090-d8b2-1323-9eae-56bd31c64'
  */
-function devernote_get_userinfo() {
+function get_conversions() {
 
-  $notestoreurl = '';
-  $userinfo = array();
-  global $user;
-
-  // Using "AS" to convert fields back to the same keys
-  // as we would receive in the $oauth_data array from Evernote.
-  $sql = "SELECT
-            uid,
-            oauth_token,
-            notestoreurl AS edam_noteStoreUrl,
-            expires AS edam_expires,
-            updates,
-            tag,
-            tag_guid
-          FROM {devernote_user}
-          WHERE uid = :uid";
-  $userinfo = db_query($sql, array(':uid' => $user->uid))->fetchAssoc();
-
-  if (isset($userinfo['oauth_token']) && (strval($userinfo['oauth_token']) != '0')) {
-    // Check if the DEVERNOTE_SANDBOX was changed
-    // after already saving the edam_noteStoreUrl.
-    $url = isset($userinfo['edam_noteStoreUrl']) ? $userinfo['edam_noteStoreUrl'] : '';
-    $sandboxurl = strstr($url, 'sandbox') ? TRUE : FALSE;
-    if ($sandboxurl === DEVERNOTE_SANDBOX) {
-      // Check if the saved auth token has expired.
-      $edam_expires = $userinfo['edam_expires'];
-      if ((time() - (60 * 60 * 24)) < $edam_expires) {
-        $notestoreurl = $userinfo['edam_noteStoreUrl'];
-
-        $enc_method = variable_get('devernote_enc_method', '');
-        if (($enc_method) && $enc_method == 'aes') {
-          $userinfo['oauth_token'] = aes_decrypt($userinfo['oauth_token']);
-        }
-        elseif (($enc_method) && $enc_method == 'encrypt') {
-          $userinfo['oauth_token'] = decrypt($userinfo['oauth_token']);
-        }
-      } else {
-        // The token has expired.
-        db_update('devernote_user')
-        ->fields(array(
-            'oauth_token' => 0,
-            'expires' => 0,
-        ))
-        ->condition('uid', $user->uid)
-        ->execute();
-        $userinfo['oauth_token'] = '';
+  $cleanup = array();
+  // TODO remove using $_POST from here.
+  if (isset($_POST['convertheadings']) && !empty($_POST['convertheadings'])) {
+    $mappings = explode(PHP_EOL, $_POST['convertheadings']);
+    if (count($mappings)) {
+      $htags = array();
+      foreach ($mappings as $mapping) {
+        $pieces = explode(',', $mapping);
+        $htags[trim($pieces[0])] = trim($pieces[1]);
       }
-    } else {
-      $userinfo = array();
+      $cleanup['htags'] = $htags;
     }
   }
-
-  // We either did not have an existing record for the user or it expired.
-  if (!isset($userinfo['oauth_token']) || $userinfo['oauth_token'] === 0) {
-
-    $oauth_data = _devernote_auth();
-    if ($oauth_data) {
-      $oauth_data['tag'] = isset($userinfo['tag']) ? $userinfo['tag'] : DEVERNOTE_DEFAULT_TAG;
-      // The tag_guid will be retrieved during the import process.
-      $oauth_data['tag_guid'] = isset($userinfo['tag_guid']) ? $userinfo['tag_guid'] : 0;
-      $oauth_data['updates'] = isset($userinfo['updates']) ? $userinfo['updates'] : 0;
-
-      _devernote_save_userinfo($oauth_data);
-    }
-    else {
-      // TODO implement actual message to screen.
-      drupal_set_message('Authorization error', 'warning');
-    }
+  if (isset($_POST['div2p'])) {
+    $cleanup['div2p'] = $_POST['div2p'];
   }
 
-  return $userinfo;
-}
-
-
-/**
- * Cleanup html retrieved from Evernote.
- *
- * For example, convert divs to p tags.
- * Also map font size attributes to h tags.
- *
- * @param string $html
- *  The html to cleanup.
- * @param array $cleanup
- *   An associative array of cleanup options. Can contain:
- *   - mappings: array of font size => h tag. For example:
- *     array('11' => 'h4', '12' => 'h3')
- *   - 'div2p' => TRUE
- *     If set to TRUE divs will be converted to p tags.
- *
- * @return string
- *   cleaned up/converted html.
- */
-function devernote_cleanup_html($html, $cleanup) {
-
-  $htags = isset($cleanup['htags']) && count($cleanup['htags']) ? TRUE : FALSE;
-  $div2p = isset($cleanup['div2p']) ? TRUE : FALSE;
-
-  // Replace spans containing a font-size with an h tag
-  // based on the mappings provided in $cleanup['htags'].
-  if ($htags) {
-    $dom = new DOMDocument();
-    $dom->loadHTML($html);
-    $spans = $dom->getElementsByTagName("span");
-    $replacements = array();
-    for ($i = $spans->length - 1; $i >= 0; $i--) {
-      $spannode = $spans->item($i);
-      if ($spannode->hasAttribute('style')) {
-        $attribute = $spannode->getAttribute('style');
-        if (stristr($attribute, 'font-size')) {
-
-          $pattern = '/font-size\s*?:.*?(;|(?=""|\'|;))/';
-          preg_match($pattern, $attribute, $match);
-          $pieces = explode(':', $match[0]);
-          // Trimming for pt and px because I've seen both come out of Evernote.
-          $size = trim($pieces[1], " pt;");
-          $size = trim($size, "px;");
-
-          // Lookup the h tag to use in place of the font-size.
-          if (array_key_exists($size, $cleanup['htags'])) {
-            $htag = $cleanup['htags'][$size];
-            $hnode = $dom->createElement($htag, $spannode->nodeValue);
-            $spannode->parentNode->replaceChild($hnode, $spannode);
-
-            // We now create a trail of tags from the  h tag to the parent div
-            // So that we can do a str_replace.
-            // For example we might have something like: <div><em><h3>
-            // (where the h3 replaced a span tag).
-            // The goal here is to get rid of the div and em tags now that
-            // we have the h3 tag in place of the span.
-            $lineage = array();
-            $lineage[] = $htag;
-
-            $parent1 = $hnode->parentNode->nodeName;
-            $lineage[] = $parent1;
-            $index = $htag . $parent1;
-
-            if ($parent1 != 'div') {
-              $parent2 = $hnode->parentNode->parentNode->nodeName;
-              $index .= $parent2;
-              $lineage[] = $parent2;
-            }
-            $replacements[$index] = $lineage;
-          }
-        }
-      }
-    }
-
-    // Now we look for divs with font-size because Evernote is not consistent.
-    $divs = $dom->getElementsByTagName("div");
-    for ($i = $divs->length - 1; $i >= 0; $i--) {
-      $divnode = $divs->item($i);
-      if ($divnode->hasAttribute('style')) {
-        $attribute = $divnode->getAttribute('style');
-        if (stristr($attribute, 'font-size')) {
-          $pattern = '/font-size\s*?:.*?(;|(?=""|\'|;))/';
-          preg_match($pattern, $attribute, $match);
-          $pieces = explode(':', $match[0]);
-          // Trimming for pt and px because I've seen both come out of Evernote.
-          $size = trim($pieces[1], " pt;");
-          $size = trim($size, "px;");
-          if (array_key_exists($size, $cleanup['htags'])) {
-            $htag = $cleanup['htags'][$size];
-          }
-          else {
-            $htag = 'h5';
-          }
-          $hnode = $dom->createElement($htag, $divnode->nodeValue);
-          $divnode->parentNode->replaceChild($hnode, $divnode);
-        }
-      }
-    }
-
-    $html = $dom->saveHTML();
-
-    // Run the replacements defined when converting spans to h3 tags.
-    if (count($replacements)) {
-      foreach ($replacements as $key => $tags) {
-        $begin = '';
-        $end = '';
-        $htag = $tags[0];
-        foreach ($tags as $tag) {
-          $end .= '</' . $tag . '>';
-        }
-        $tags = array_reverse($tags);
-        foreach ($tags as $tag) {
-          $begin .= '<' . $tag . '>';
-        }
-        $html = str_replace(array($begin, $end), array('<' . $htag . '>', '</' . $htag . '>'), $html);
-      }
-    }
-
-    if ($div2p) {
-      $html = str_replace('<div>&nbsp;</div>', '', $html);
-      $html = str_replace('<div><br clear="none"></div>', '', $html);
-      $html = str_replace('<div><br></div>', '', $html);
-      $html = str_replace('<div><br/></div>', '', $html);
-      $html = str_replace(array('<div>', '</div>'), array('<p>', '</p>'), $html);
-      $html = str_replace('<br clear="none">', '', $html);
-    }
-  }
-
-  return $html;
-}
-
-
-/**
- * Check if there are new or updated notes since the last check.
- *
- * Saves the new syncstate to the database.
- * Getting the syncstate (updateCount) is a much less expensive call
- * than searching the notes for tagged items.
- *
- * This will retrieve a SyncState object and check the updateCount:
- * object \EDAM\NoteStore\SyncState
- *  public 'currentTime' => int 1421181104176
- *  public 'fullSyncBefore' => int 1421087557000
- *  public 'updateCount' => int 20
- *  public 'uploaded' => int 34066
- *
- * @param object \Evernote\Client
- *   Client object.
- * @param int $lastcount
- *   The number of updates previously recorded.
- *
- * @return boolean
- *   TRUE if there are new or updated items. Otherwise FALSE.
- *
- * @see https://dev.evernote.com/doc/articles/polling_notification.php
- */
-function _devernote_syncstate($client, $lastcount = 0) {
-
-  $noteStore = $client->getUserNotestore();
-  $syncState = $noteStore->getSyncState($client->getToken());
-  $currentcount = $syncState->updateCount;
-
-  global $user;
-
-  if ($currentcount > $lastcount) {
-    // Save the current count to the db.
-    $num_updated = db_update('devernote_user')
-    ->fields(array(
-        'updates' => $currentcount,
-    ))
-    ->condition('uid', $user->uid)
-    ->execute();
-
-    return TRUE;
-  }
-
-  return FALSE;
-}
-
-
-/**
- * Authorize the Evernote connection.
- *
- * @return mixed
- *   On success returns an array with the following info:
- *    array (size=7)
- *    'oauth_token' => 'S=s1:U=802ed:E=1513e335e74:C=14ae6822eb8:P=185:A=jsmith-9647:V=2:H=94efbf7661da4dda35246ae3e6e228ea'
- *    'oauth_token_secret' => ''
- *    'edam_shard' => 's1'
- *    'edam_userId' => '493472'
- *    'edam_expires' => '1452742499940'
- *    'edam_noteStoreUrl' => 'https://sandbox.evernote.com/shard/s1/notestore'
- *    'edam_webApiUrlPrefix' => 'https://sandbox.evernote.com/shard/s1/'
- *  On failure will return FALSE.
- */
-function _devernote_auth() {
-
-  $oauth_handler = new \Evernote\Auth\OauthHandler(DEVERNOTE_SANDBOX);
-  $key = variable_get('devernote_consumer_key', '');
-  $secret = variable_get('devernote_secret_key', '');
-  if (!$secret) {
-    return FALSE;
-  }
-
-  global $base_url;
-  $callback = $base_url . request_uri();
-
-  try {
-    $oauth_data = $oauth_handler->authorize($key, $secret, $callback);
-
-    global $user;
-    if (module_exists('aes')) {
-      $oauth_data['oauth_token'] = aes_encrypt($oauth_data['oauth_token']);
-      variable_set('devernote_enc_method', 'aes');
-    }
-    elseif (module_exists('encrypt')) {
-      $oauth_data['oauth_token'] = encrypt($oauth_data['oauth_token']);
-      variable_set('devernote_enc_method', 'encrypt');
-    }
-    else {
-      variable_set('devernote_enc_method', 'none');
-    }
-
-    return $oauth_data;
-
-  }
-  catch (Evernote\Exception\AuthorizationDeniedException $e) {
-    // If the user declines the authorization, an exception is thrown.
-    return FALSE;
-  }
-}
-
-
-/**
- * Save oauth data returned from Evernote locally.
- *
- * Also saves additional information such as the tag used for import.
- *
- * Make sure $userinfo if fully populated before calling this
- * so that it will properly update existing records.
- * For example, if the module needs to reauthenticate a user.
- *
- * @param array $userinfo
- *   Array of data to save.
- */
-function _devernote_save_userinfo($userinfo) {
-
-  global $user;
-
-  $digits = strlen((string) $userinfo['edam_expires']);
-  if ($digits == 13) {
-    $userinfo['edam_expires'] = (int) $userinfo['edam_expires'] / 1000;
-  }
-
-  db_merge('devernote_user')
-  ->key(array('uid' => $user->uid))
-  ->fields(array(
-  'oauth_token' => $userinfo['oauth_token'],
-  'notestoreurl' => $userinfo['edam_noteStoreUrl'],
-  'expires' => (int) $userinfo['edam_expires'],
-  'updates' => $userinfo['updates'],
-  'tag' => $userinfo['tag'],
-  'tag_guid' => $userinfo['tag_guid'],
-  ))
-  ->execute();
-}
-
-
-/**
- * Save an imported Evernote note as a node.
- *
- * @param array $info
- *   The data to save for the node.
- *   'body' - the node body content to save.
- *   'title' - the title for the node.
- *   'status' - the publishing status. Defaults to 0, unpublished.
- *   'comment' - 0 = comments disabled, 1 = read only (default), 2 = read/write.
- *   'promote' - Promoted to the front page or not. Defaults to 1.
- *   'input_format' - plain_text, filtered_html, full_html, etc.
- *    You can set the defaults for status, comment, format, and promote on the
- *    module's configuration page.
- */
-function _devernote_save_node($info) {
-
-  global $user;
-
-  $node = new stdClass();
-  $node->type = $info['node_type'];
-  $node->title    = $info['title'];
-  node_object_prepare($node);
-
-  $node->uid = $user->uid;
-  $node->language = LANGUAGE_NONE;
-
-  // TODO test and implement.
-  // Apply all enabeld filters for the selected text format.
-  // $info['body'] = check_markup($info['body'], $info['input_format']);
-  $node->body[$node->language][0]['value'] = $info['body'];
-  $node->body[$node->language][0]['summary'] = text_summary($info['body']);
-  $node->body[$node->language][0]['format']  = $info['input_format'];
-
-  $node->status = isset($info['status']) ? $info['status'] : variable_get('devernote_nodestatus', 0);
-  $node->comment = isset($info['comment']) ? $info['comment'] : variable_get('devernote_nodecomments', 1);
-  $node->promote = isset($info['promote']) ? $info['promote'] : variable_get('devernote_nodepromoted', 1);
-
-  node_save($node);
-
-  Database::getConnection('default', 'default')->insert('devernote_notes')
-  ->fields(array(
-  'note_guid' => $info['note_guid'],
-  'nid' => $node->nid,
-  'uid' => $user->uid,
-  ))
-  ->execute();
-
-  return $node->nid;
+  return $cleanup;
 }
 
 
@@ -900,4 +392,722 @@ function _devernote_save_resource($resource, $notestoreurl, $auth_token) {
     return $fileinfo;
   }
   return FALSE;
+}
+
+
+class Devernote {
+
+  protected $client = NULL;
+
+  /**
+   * @var array
+   *  An array of authorization information as well as if the data is valid.
+   *
+   * 'oauth_token' => 'S=s1:U=802ed:E=1513e335e74:C=14ae6822eb8:P=185:A=jsmith-9647:V=2:H=94efbf7661da4dda35246ae3e6e228ea';
+   * 'edam_noteStoreUrl' => 'https://sandbox.evernote.com/shard/s1/notestore'
+   * 'edam_expires' => '1452742499940'
+   * 'updates' => '25' - the count from syncstate
+   * 'tag' => 'drupalimport'
+   * 'tag_guid' => 'e669c090-d8b2-1323-9eae-56bd31c64'
+   * 'valid' => FALSE
+   */
+  public $userinfo = array();
+
+  /**
+   * @var Exception
+   * Any exceptions thrown by the evernote api calls.
+   */
+  protected $exception = NULL;
+
+  public $errors = array();
+
+
+  function __construct() {
+
+    $this->initialize_userinfo();
+
+    if ($this->userinfo['valid']) {
+      $this->client = new \Evernote\Client($this->userinfo['oauth_token'], DEVERNOTE_SANDBOX);
+    }
+  }
+
+
+  /**
+   * Set userinfo array using either local data or from authorization.
+   */
+  public function initialize_userinfo() {
+
+    $this->userinfo['valid'] = FALSE;
+    $this->userinfo['tag'] = DEVERNOTE_DEFAULT_TAG;
+    $this->userinfo['tag_guid'] = 0;
+    $this->userinfo['updates'] = 0;
+
+    $userinfo = $this->load_userinfo();
+    if ($userinfo) {
+      $this->userinfo = array_merge($this->userinfo, $userinfo);
+      $this->userinfo['valid'] = $this->validate_userinfo();
+      if ($this->userinfo['valid']) {
+        // Only need to decrypt if it came from the db.
+        $this->userinfo['oauth_token'] = $this->decrypt_token($userinfo['oauth_token']);
+      }
+    }
+
+    if (!$userinfo || !$this->userinfo['valid']) {
+      $success = $this->authorize_user();
+      if ($success) {
+        $this->save_userinfo();
+      }
+      else {
+        // TODO check if we've already set an error.
+        $this->errors[] = t('There was an error authorizing the account');
+      }
+    }
+  }
+
+
+  /**
+   * Retrieve locally saved user/auth data from the database.
+   *
+   * @return mixed
+   *   Arry of results if record exists otherwise FALSE.
+   */
+  public function load_userinfo() {
+
+    global $user;
+
+    // Using "AS" to convert fields back to the same keys
+    // as we would receive in the $oauth_data array from Evernote.
+    $sql = "SELECT
+            uid,
+            oauth_token,
+            notestoreurl AS edam_noteStoreUrl,
+            expires AS edam_expires,
+            updates,
+            tag,
+            tag_guid
+          FROM {devernote_user}
+          WHERE uid = :uid";
+    $userinfo = db_query($sql, array(':uid' => $user->uid))->fetchAssoc();
+
+    return $userinfo;
+  }
+
+  /**
+   * Check if there are new or updated notes since the last check.
+   *
+   * Saves the new syncstate to the database.
+   * Getting the syncstate (updateCount) is a much less expensive call
+   * than searching the notes for tagged items.
+   *
+   * This will retrieve a SyncState object and check the updateCount:
+   * object \EDAM\NoteStore\SyncState
+   *  public 'currentTime' => int 1421181104176
+   *  public 'fullSyncBefore' => int 1421087557000
+   *  public 'updateCount' => int 20
+   *  public 'uploaded' => int 34066
+   *
+   * @return bool
+   *   TRUE if there are new or updated items. Otherwise FALSE.
+   *
+   * @see https://dev.evernote.com/doc/articles/polling_notification.php
+   */
+  public function evernote_syncstate() {
+
+    $noteStore = $this->client->getUserNotestore();
+
+    $syncState = $noteStore->getSyncState($this->userinfo['oauth_token']);
+
+    $currentcount = $syncState->updateCount;
+    if ($currentcount > $this->userinfo['updates']) {
+      // Save the current count to the db.
+      $this->update_user_updates($currentcount);
+
+      $this->userinfo['updates'] = $currentcount;
+
+      return TRUE;
+    }
+
+    return FALSE;
+  }
+
+  /**
+   * Update the 'updates' field in devernote_users.
+   *
+   * This contains the last update count from evernote.
+   *
+   * @param int $count
+   */
+  public function update_user_updates($count) {
+
+    global $user;
+
+    $num_updated = db_update('devernote_user')
+    ->fields(array(
+        'updates' => $count,
+    ))
+    ->condition('uid', $user->uid)
+    ->execute();
+  }
+
+
+  /**
+   * Make sure the $userinfo is valid.
+   *
+   * For example, oauth_token is set and hasn't expired.
+   *
+   * @return boolean
+   *   TRUE if valid, otherwise FALSE.
+   */
+  public function validate_userinfo() {
+
+    $valid = FALSE;
+
+    if (isset($this->userinfo['oauth_token']) && (strval($this->userinfo['oauth_token']) != '0')) {
+
+      $valid = $this->validate_notestoreurl();
+      $valid = $this->validate_token_date();
+    }
+
+    return $valid;
+  }
+
+  /**
+   * Check if DEVERNOTE_SANDBOX is different from edam_noteStoreUrl in the db.
+   *
+   * In other words, did we start off using the sandbox, grant authorization
+   * which was saved to the db, and then change to production. If so,
+   * the if statement will be false and we'll assign an empty array to
+   * $userinfo so that we are forced to reauthorize.
+   *
+   * @return boolean
+   *   TRUE if valid otherwise FALSE.
+   */
+  public function validate_notestoreurl() {
+
+    $url = isset($this->userinfo['edam_noteStoreUrl']) ? $this->userinfo['edam_noteStoreUrl'] : '';
+    $sandboxurl = strstr($url, 'sandbox') ? TRUE : FALSE;
+    if ($sandboxurl === DEVERNOTE_SANDBOX) {
+      return TRUE;
+    }
+    else {
+      return FALSE;
+    }
+  }
+
+  /**
+   * Check if the oauth token has expired.
+   *
+   * By default these are good for one year.
+   *
+   * @return boolean
+   *   TRUE if valid otherwise FALSE (expired).
+   */
+  public function validate_token_date() {
+
+    $valid = FALSE;
+
+    if ((time() - (60 * 60 * 24)) < $this->userinfo['edam_expires']) {
+      $valid = TRUE;
+    }
+
+    return $valid;
+  }
+
+
+  /**
+   * Get the tag_guid to use for retrieving notes from Evernote.
+   *
+   * @return mixed
+   *   String containing the guid if successful otherwise FALSE.
+   */
+  public function get_tag_guid($tag_name) {
+
+    if (isset($this->userinfo['tag_guid']) && ($this->userinfo['tag_guid'])) {
+      return $this->userinfo['tag_guid'];
+    } else {
+
+      $notestore = $this->client->getUserNotestore();
+      $tags = $notestore->listTags($this->userinfo['oauth_token']);
+
+      $tag_guid = FALSE;
+      if (count($tags)) {
+        foreach ($tags as $tag) {
+          if ($tag->name == $tag_name) {
+            global $user;
+            $tag_guid = $tag->guid;
+
+            $num_updated = db_update('devernote_user')
+            ->fields(array(
+                'tag_guid' => $tag_guid,
+            ))
+            ->condition('uid', $user->uid)
+            ->execute();
+          }
+        }
+      }
+      return $tag_guid;
+    }
+  }
+
+
+  /**
+   * Decrypt the token.
+   *
+   * @param string $token
+   *   The oauth token provided by Evernote.
+   */
+  public function decrypt_token($token) {
+
+    $enc_method = variable_get('devernote_enc_method', '');
+    if (($enc_method) && $enc_method == 'aes') {
+      $token = aes_decrypt($token);
+    }
+    elseif (($enc_method) && $enc_method == 'encrypt') {
+      $token = decrypt($token);
+    }
+
+    return $token;
+  }
+
+  /**
+   * Get the encrypted token.
+   *
+   * @return string $token
+   *   The oauth token provided by Evernote.
+   */
+  public function encrypt_token($token) {
+
+    if (module_exists('aes')) {
+      $token = aes_encrypt($token);
+      variable_set('devernote_enc_method', 'aes');
+    }
+    elseif (module_exists('encrypt')) {
+      $token = encrypt($token);
+      variable_set('devernote_enc_method', 'encrypt');
+    }
+    else {
+      variable_set('devernote_enc_method', 'none');
+    }
+
+    return $token;
+  }
+
+
+  /**
+   * Authorize with Evernote.
+   *
+   * If successful, $oauth_data will be an array of:
+   * 'oauth_token' => string 'S=s1:U=8b7:E=26ab546123s:C=1535fb4e520:P=185:A=jsmith-5428:V=2:H=3bg2ef3deb26cz40b04c597f986cb2r0'
+   * 'oauth_token_secret' => string ''
+   * 'edam_shard' => string 's1'
+   * 'edam_userId' => string '5719'
+   * 'edam_expires' => string '1489135604302'
+   * 'edam_noteStoreUrl' => string 'https://www.evernote.com/shard/s1/notestore'
+   * 'edam_webApiUrlPrefix' => string 'https://www.evernote.com/shard/s1/'
+   *
+   * @return boolean
+   *   TRUE if the user was authorized otherwise FALSE.
+   */
+  public function authorize_user() {
+
+    $oauth_handler = new \Evernote\Auth\OauthHandler(DEVERNOTE_SANDBOX);
+    $key = variable_get('devernote_consumer_key', '');
+    $secret = variable_get('devernote_secret_key', '');
+    if (!$secret) {
+      $this->errors[] = 'Missing secret key. Please set it on the devernote settings page.';
+      return FALSE;
+    }
+
+    global $base_url;
+    $callback = $base_url . request_uri();
+
+    try {
+      // See above for contents of $oauth_data.
+      $oauth_data = $oauth_handler->authorize($key, $secret, $callback);
+      if ($oauth_data) {
+        $this->userinfo['oauth_token'] = $oauth_data['oauth_token'];
+        $this->userinfo['edam_userId'] = $oauth_data['edam_userId'];
+        $this->userinfo['edam_noteStoreUrl'] = $oauth_data['edam_noteStoreUrl'];
+        $this->userinfo['edam_expires'] = $oauth_data['edam_expires'];
+
+        return TRUE;
+      }
+      return FALSE;
+    }
+    catch (Evernote\Exception\AuthorizationDeniedException $e) {
+      // If the user declines the authorization, an exception is thrown.
+      $this->exception = $e;
+      $this->errors[] = 'Authorization declined.';
+
+      return FALSE;
+    }
+  }
+
+  /**
+   * Retrieve notes based on a supplied tag_guid.
+   *
+   * Retrieved notes will be processed via process_note().
+   * The processed notes will then be saved via save_node() and save_note().
+   *
+   * @param string $tag_guid
+   *   Unique evernote guid fot the tag.
+   *
+   * @param array $conversions
+   *   An associative array of cleanup options. Can contain:
+   *   - mappings: array of font size => h tag. For example:
+   *     array('11' => 'h4', '12' => 'h3')
+   *   - 'div2p' => TRUE
+   *     If set to TRUE divs will be converted to p tags.
+   *     (Evernote exports each paragraph as a div).
+   *
+   * @param array $node_settings
+   *   Settings to use when saving notes as nodes.
+   *   These are provided by the import form and retrieved from the $_POST var.
+   *   'status' => 1 - the status to set for the node.
+   *   'promote' => 1 - promoted to front page or not.
+   *   'comments' => 1 - whether or not to allow comments.
+   *   'import_type' => 'article' - Node type to create.
+   *   'input_format' => 'full_html' - 'full_html', 'plain_text', etc.
+   *
+   * @return array
+   *   An array of html links linking to the newly created nodes.
+   */
+  public function retrieve_tagged_notes($tag_guid, $conversions, $node_settings) {
+
+    $notes = array();
+
+    $filter = new \EDAM\NoteStore\NoteFilter();
+    $filter->tagGuids  = array($tag_guid);
+
+    $resultSpec = new \EDAM\NoteStore\NotesMetadataResultSpec();
+    $notesMetadataList = $this->client->getUserNotestore()->findNotesMetadata($this->userinfo['oauth_token'], $filter, 0, 100, $resultSpec);
+
+    $imported = FALSE;
+
+    if (count($notesMetadataList->notes)) {
+
+      // Load the guids of previously imported notes.
+      $guids = $this->load_imported_notes();
+
+      $nodes = array();
+      foreach ($notesMetadataList->notes as $noteMetadata) {
+
+        // Only import the node if we haven't already imported it.
+        if (!in_array($noteMetadata->guid, $guids)) {
+          $imported = TRUE;
+          $note = $this->client->getNote($noteMetadata->guid);
+
+          // Apply any selected conversions to the note/html.
+          $body = $this->process_note($note, $conversions);
+
+          $node_settings['title'] = $note->getTitle();
+          $node_settings['body'] = $body;
+          $node_settings['note_guid'] = $note->getGuid();
+
+          $nid = $this->save_node($node_settings);
+          $this->save_note($noteMetadata->guid, $nid);
+
+          // TODO move to theme layer.
+          $notes[] = '<p>' . l($node_settings['title'], 'node/' . $nid) . '</p>';
+        }
+      }
+    }
+
+    return $notes;
+  }
+
+
+  /**
+   * Process an incoming evernote Note so it can be saved as a node.
+   *
+   * Also processes any embedded images.
+   * For additional methods and attributes of a Note object see:
+   * /sites/all/libraries/composer/evernote/evernote-cloud-sdk-php/src/Evernote/Model/Note.php
+   *
+   * @param Note $note
+   *   An evernote sdk Note object. See link path above.
+   *
+   * @param array $conversions
+   *   See retrieve_tagged_notes() for details.
+   *
+   * @return string
+   *   An html version of the note, useful for saving as the body of a node.
+   */
+  public function process_note($note, $conversions) {
+
+    $body = $note->content->toHtml();
+
+    // TODO verify these are images.
+    $resources = $note->getResources();
+    if (count($resources)) {
+      foreach ($resources as $resource) {
+        // Retrieve the image from evernote and save it locally.
+        $fileinfo = _devernote_save_resource($resource, $this->userinfo['edam_noteStoreUrl'], $this->userinfo['oauth_token']);
+
+        if (($fileinfo) && isset($fileinfo['extension'])) {
+          $replace = '/images/' . $fileinfo['filename_md5'] . '.' . $fileinfo['extension'];
+          if (isset($fileinfo['path_imagestyle'])) {
+            $url = $fileinfo['path_imagestyle'];
+          }
+          else {
+            $path = file_stream_wrapper_get_instance_by_uri('public://')->getDirectoryPath() . DIRECTORY_SEPARATOR . 'devernote' . DIRECTORY_SEPARATOR . $fileinfo['filename'];
+            $url = file_create_url($path);
+          }
+          $body = str_ireplace($replace, $url, $body);
+        }
+      }
+    }
+
+    if (count($conversions)) {
+      $body = $this->cleanup_html($body, $conversions);
+    }
+
+    return $body;
+  }
+
+
+  /**
+   * Saves authorization information to the db.
+   */
+  public function save_userinfo() {
+
+    global $user;
+
+    // Convert to seconds from milliseconds as provided by Evernote.
+    $digits = strlen((string) $this->userinfo['edam_expires']);
+    if ($digits == 13) {
+      $this->userinfo['edam_expires'] = (int) $this->userinfo['edam_expires'] / 1000;
+    }
+
+    $token = $this->encrypt_token($this->userinfo['oauth_token']);
+    // The tag_guid will be retrieved and saved during the import process.
+    $tag_guid = isset($this->userinfo['tag_guid']) ? $this->userinfo['tag_guid'] : 0;
+
+    db_merge('devernote_user')
+    ->key(array('uid' => $user->uid))
+    ->fields(array(
+        'oauth_token' => $token,
+        'notestoreurl' => $this->userinfo['edam_noteStoreUrl'],
+        'expires' => (int) $this->userinfo['edam_expires'],
+        'updates' => $this->userinfo['updates'],
+        'tag' => $this->userinfo['tag'],
+        'tag_guid' => $this->userinfo['tag_guid'],
+    ))
+    ->execute();
+  }
+
+  /**
+   * Load the guids of all previously imported notes.
+   *
+   * @return array
+   *   Array of note guids. Used to check if a note has already been imported.
+   */
+  public function load_imported_notes() {
+    $guids = db_select('devernote_notes')
+    ->fields('devernote_notes', array('note_guid'))
+    ->execute()
+    ->fetchCol();
+
+    return $guids;
+  }
+
+
+  /**
+   * Cleanup html retrieved from Evernote.
+   *
+   * For example, convert divs to p tags.
+   * Also map font size attributes to h tags.
+   *
+   * @param string $html
+   *   The html to cleanup.
+   * @param array $cleanup
+   *   An associative array of cleanup options. Can contain:
+   *   - mappings: array of font size => h tag. For example:
+   *     array('11' => 'h4', '12' => 'h3')
+   *   - 'div2p' => TRUE
+   *     If set to TRUE divs will be converted to p tags.
+   *
+   * @return string
+   *   cleaned up/converted html.
+   */
+  public function cleanup_html($html, $cleanup) {
+
+    $htags = isset($cleanup['htags']) && count($cleanup['htags']) ? TRUE : FALSE;
+    $div2p = isset($cleanup['div2p']) ? TRUE : FALSE;
+
+    // Replace spans containing a font-size with an h tag
+    // based on the mappings provided in $cleanup['htags'].
+    if ($htags) {
+      $dom = new DOMDocument();
+      $dom->loadHTML($html);
+      $spans = $dom->getElementsByTagName("span");
+      $replacements = array();
+      for ($i = $spans->length - 1; $i >= 0; $i--) {
+        $spannode = $spans->item($i);
+        if ($spannode->hasAttribute('style')) {
+          $attribute = $spannode->getAttribute('style');
+          if (stristr($attribute, 'font-size')) {
+
+            $pattern = '/font-size\s*?:.*?(;|(?=""|\'|;))/';
+            preg_match($pattern, $attribute, $match);
+            $pieces = explode(':', $match[0]);
+            // Trimming for pt and px because both come out of Evernote.
+            $size = trim($pieces[1], " pt;");
+            $size = trim($size, "px;");
+
+            // Lookup the h tag to use in place of the font-size.
+            if (array_key_exists($size, $cleanup['htags'])) {
+              $htag = $cleanup['htags'][$size];
+              $hnode = $dom->createElement($htag, $spannode->nodeValue);
+              $spannode->parentNode->replaceChild($hnode, $spannode);
+
+              // We now create a trail of tags from the  h tag to the parent div
+              // So that we can do a str_replace.
+              // For example we might have something like: <div><em><h3>
+              // (where the h3 replaced a span tag).
+              // The goal here is to get rid of the div and em tags now that
+              // we have the h3 tag in place of the span.
+              $lineage = array();
+              $lineage[] = $htag;
+
+              $parent1 = $hnode->parentNode->nodeName;
+              $lineage[] = $parent1;
+              $index = $htag . $parent1;
+
+              if ($parent1 != 'div') {
+                $parent2 = $hnode->parentNode->parentNode->nodeName;
+                $index .= $parent2;
+                $lineage[] = $parent2;
+              }
+              $replacements[$index] = $lineage;
+            }
+          }
+        }
+      }
+
+      // Now we look for divs with font-size because Evernote is not consistent.
+      $divs = $dom->getElementsByTagName("div");
+      for ($i = $divs->length - 1; $i >= 0; $i--) {
+        $divnode = $divs->item($i);
+        if ($divnode->hasAttribute('style')) {
+          $attribute = $divnode->getAttribute('style');
+          if (stristr($attribute, 'font-size')) {
+            $pattern = '/font-size\s*?:.*?(;|(?=""|\'|;))/';
+            preg_match($pattern, $attribute, $match);
+            $pieces = explode(':', $match[0]);
+            // Trimming for pt and px because both come out of Evernote.
+            $size = trim($pieces[1], " pt;");
+            $size = trim($size, "px;");
+            if (array_key_exists($size, $cleanup['htags'])) {
+              $htag = $cleanup['htags'][$size];
+            }
+            else {
+              $htag = 'h5';
+            }
+            $hnode = $dom->createElement($htag, $divnode->nodeValue);
+            $divnode->parentNode->replaceChild($hnode, $divnode);
+          }
+        }
+      }
+
+      $html = $dom->saveHTML();
+
+      // Run the replacements defined when converting spans to h3 tags.
+      if (count($replacements)) {
+        foreach ($replacements as $key => $tags) {
+          $begin = '';
+          $end = '';
+          $htag = $tags[0];
+          foreach ($tags as $tag) {
+            $end .= '</' . $tag . '>';
+          }
+          $tags = array_reverse($tags);
+          foreach ($tags as $tag) {
+            $begin .= '<' . $tag . '>';
+          }
+          $html = str_replace(array($begin, $end), array('<' . $htag . '>', '</' . $htag . '>'), $html);
+        }
+      }
+    }
+
+    if ($div2p) {
+      $html = str_replace('<div>&nbsp;</div>', '', $html);
+      $html = str_replace('<div><br clear="none"></div>', '', $html);
+      $html = str_replace('<div><br></div>', '', $html);
+      $html = str_replace('<div><br/></div>', '', $html);
+      $html = str_replace('<div><br /></div>', '', $html);
+      $html = str_replace(array('<div>', '</div>'), array('<p>', '</p>'), $html);
+      $html = str_replace('<br clear="none">', '', $html);
+    }
+
+    return $html;
+  }
+
+
+  /**
+   * Save an imported Evernote note as a node.
+   *
+   * @param array $info
+   *   The data to save for the node.
+   *   'type' - the type of node to create.
+   *   'body' - the node body content to save.
+   *   'title' - the title for the node.
+   *   'status' - the publishing status. Defaults to 0, unpublished.
+   *   'comment' - 0 = comments disabled, 1 = read only (default), 2 = read/write.
+   *   'promote' - Promoted to the front page or not. Defaults to 1.
+   *   'input_format' - plain_text, filtered_html, full_html, etc.
+   *    You can set the defaults for status, comment, format, and promote on the
+   *    module's configuration page.
+   *
+   * @return int
+   *   The nid of the saved node.
+   */
+  public function save_node($info) {
+
+    global $user;
+
+    $node = new stdClass();
+    $node->type = $info['node_type'];
+    $node->title = $info['title'];
+    node_object_prepare($node);
+
+    $node->uid = $user->uid;
+    $node->language = LANGUAGE_NONE;
+
+    // $info['body'] = check_markup($info['body'], $info['input_format']);
+    $node->body[$node->language][0]['value'] = $info['body'];
+    $node->body[$node->language][0]['summary'] = text_summary($info['body']);
+    $node->body[$node->language][0]['format']  = $info['input_format'];
+
+    $node->status = $info['status'];
+    $node->comment = $info['comments'];
+    $node->promote = $info['promote'];
+
+    node_save($node);
+
+    return $node->nid;
+  }
+
+  /**
+   * Save the devernote_notes record.
+   *
+   * @param string $note_guid
+   *   Unique id of the note: Note->getGuid()
+   *
+   * @param int $nid
+   *   Node nid.
+   */
+  public function save_note($note_guid, $nid) {
+
+    global $user;
+
+    Database::getConnection('default', 'default')->insert('devernote_notes')
+    ->fields(array(
+        'note_guid' => $note_guid,
+        'nid' => $nid,
+        'uid' => $user->uid,
+    ))
+    ->execute();
+  }
+
 }

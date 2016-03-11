@@ -9,7 +9,14 @@
  */
 function devernote_settings_form() {
   $form = array();
-
+  /*
+  $form['devernote_delete_auth'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Delete authorization'),
+    '#default_value' => 0,
+    '#description' => t('Delete the current Evernote authorization. This will force a reauthorization to import notes.'),
+  );
+  */
   $form['devernote_consumer_key'] = array(
     '#type' => 'textfield',
     '#title' => t('Consumer Key'),
@@ -122,5 +129,27 @@ function devernote_settings_form() {
     );
   }
 
+  $form['#submit'][] = 'delete_auth_handler';
+
   return system_settings_form($form);
 }
+
+
+function delete_auth_handler($form, &$form_state) {
+
+  global $user;
+
+  $delete = $form_state['values']['devernote_delete_auth'];
+  if ($delete === 1) {
+
+    db_update('devernote_user')
+    ->fields( array (
+      'oauth_token' => 0,
+      'expires' => 0,
+    ))
+    ->condition('uid' , $user->uid)
+    ->execute();
+  }
+}
+
+
