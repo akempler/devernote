@@ -199,9 +199,11 @@ function devernote_import_form($form, &$form_state) {
                     You can then view the source and see what sizes it used. Then delete the node and import again.<br />
                     Enter font sizes followed by a comma with the corresponding html H tag you want it converted to.
                     One per line. For example:<br />
-                    14, h5<br />
-                    15, h5<br />
-                    16, h4<br />
+                    14, h4<br />
+                    15, h3<br />
+                    16, h2<br />
+                    17, h2<br />
+                    18, h1<br />
                     With the above settings, when the note gets imported any text wrapped with a &lt;div style="font-size: 11px;"&gt; would get wrapped in an h5 tag instead.<br />
                     Leave the field blank to use the note html as is.<br />
                     NOTE: these settings will be ignored if the input format is set to plain text when importing.',
