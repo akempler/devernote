@@ -81,7 +81,14 @@ function devernote_node_delete($node) {
   db_delete('devernote_notes')->condition('nid', $node->nid)->execute();
 
   // Reset the updates field otherwise syncstate will say there are no new notes.
-  update_user_updates(0);
+  global $user;
+
+  $num_updated = db_update('devernote_user')
+  ->fields(array(
+      'updates' => 0,
+  ))
+  ->condition('uid', $user->uid)
+  ->execute();
 }
 
 
@@ -89,6 +96,8 @@ function devernote_node_delete($node) {
  * Provide a form for importing notes from Evernote.
  */
 function devernote_import_form($form, &$form_state) {
+
+  global $user;
 
   $userinfo = $form_state['build_info']['args'][0];
 
@@ -395,6 +404,35 @@ function _devernote_save_resource($resource, $notestoreurl, $auth_token) {
 }
 
 
+/**
+ * Load the secret and consumer api keys from the db.
+ *
+ * @return array
+ *   An associative array of the keys with the keys 'secret' and 'consumer'
+ */
+function devernote_load_keys() {
+
+  global $user;
+
+  $keys = db_select('devernote_user')
+  ->fields('devernote_user', array('secret_key', 'consumer_key'))
+  ->condition('uid', $user->uid)
+  ->execute()
+  ->fetchAssoc();
+
+  if (($keys) && ($keys['secret_key'] != '0')) {
+    if (module_exists('aes')) {
+      $keys['secret_key'] = aes_decrypt($keys['secret_key']);
+    }
+    elseif (module_exists('encrypt')) {
+      $keys['secret_key'] = decrypt($keys['secret_key']);
+    }
+  }
+
+  return $keys;
+}
+
+
 class Devernote {
 
   protected $client = NULL;
@@ -673,7 +711,7 @@ class Devernote {
    * Get the encrypted token.
    *
    * @return string $token
-   *   The oauth token provided by Evernote.
+   *   The oauth token provided by Evernote, encrypted if possible.
    */
   public function encrypt_token($token) {
 
@@ -710,20 +748,20 @@ class Devernote {
    */
   public function authorize_user() {
 
-    $oauth_handler = new \Evernote\Auth\OauthHandler(DEVERNOTE_SANDBOX);
-    $key = variable_get('devernote_consumer_key', '');
-    $secret = variable_get('devernote_secret_key', '');
-    if (!$secret) {
-      $this->errors[] = 'Missing secret key. Please set it on the devernote settings page.';
+    $keys = devernote_load_keys();
+    if (!$keys) {
+      $this->errors[] = 'Missing api keys. Please set them on the devernote settings page.';
       return FALSE;
     }
+
+    $oauth_handler = new \Evernote\Auth\OauthHandler(DEVERNOTE_SANDBOX);
 
     global $base_url;
     $callback = $base_url . request_uri();
 
     try {
       // See above for contents of $oauth_data.
-      $oauth_data = $oauth_handler->authorize($key, $secret, $callback);
+      $oauth_data = $oauth_handler->authorize($keys['consumer_key'], $keys['secret_key'], $callback);
       if ($oauth_data) {
         $this->userinfo['oauth_token'] = $oauth_data['oauth_token'];
         $this->userinfo['edam_userId'] = $oauth_data['edam_userId'];

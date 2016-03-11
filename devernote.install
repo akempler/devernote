@@ -90,6 +90,20 @@ function devernote_schema() {
         'not null' => TRUE,
         'default' => '0',
       ),
+      'secret_key' => array(
+        'description' => 'Secret key provided by Evernote to access api.',
+        'type' => 'varchar',
+        'length' => '250',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'consumer_key' => array(
+        'description' => 'Consumer key provided by Evernote to access api.',
+        'type' => 'varchar',
+        'length' => '250',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
     ),
     'primary key' => array('uid'),
     'indexes' => array(
@@ -100,6 +114,35 @@ function devernote_schema() {
   return $schema;
 }
 
+/**
+ * New columns in {devernote_user} : secret_key, consumer_key
+ */
+function devernote_update_7000() {
+
+  $spec = array(
+    'description' => 'Secret key provided by Evernote to access api.',
+    'type' => 'varchar',
+    'length' => '250',
+    'not null' => TRUE,
+    'default' => 0,
+  );
+  db_add_field( 'devernote_user', 'secret_key', $spec);
+
+  $spec = array(
+    'description' => 'Consumer key provided by Evernote to access api.',
+    'type' => 'varchar',
+    'length' => '250',
+    'not null' => TRUE,
+    'default' => 0,
+  );
+  db_add_field( 'devernote_user', 'consumer_key', $spec);
+
+  variable_del('devernote_consumer_key');
+  variable_del('devernote_secret_key');
+
+  drupal_set_message('Please tell all users to re-enter their consumer and secret keys.', 'warning');
+}
+
 
 /**
  * Implements hook_uninstall().
@@ -107,4 +150,11 @@ function devernote_schema() {
 function devernote_uninstall() {
 
   variable_del('devernote_enc_method');
+  variable_del('devernote_nodestatus');
+  variable_del('devernote_nodepromoted');
+  variable_del('devernote_nodecomments');
+  variable_del('devernote_inputformat');
+  variable_del('devernote_imagestyle');
+  variable_del('devernote_div2p');
+  variable_del('devernote_convertheadings');
 }

@@ -8,6 +8,16 @@
  * Provide a settings form for the module.
  */
 function devernote_settings_form() {
+
+  $keys = devernote_load_keys();
+  if ($keys) {
+    $secret = ($keys['secret_key'] == '0') ? '' : $keys['secret_key'];
+    $consumer = ($keys['consumer_key'] == '0') ? '' : $keys['consumer_key'];
+  } else {
+    $secret = '';
+    $consumer = '';
+  }
+
   $form = array();
   /*
   $form['devernote_delete_auth'] = array(
@@ -20,14 +30,14 @@ function devernote_settings_form() {
   $form['devernote_consumer_key'] = array(
     '#type' => 'textfield',
     '#title' => t('Consumer Key'),
-    '#default_value' => variable_get('devernote_consumer_key', ''),
+    '#default_value' => $consumer,
     '#description' => t('The Consumer Key provided by Evernote when signing up for an API Key.'),
   );
 
   $form['devernote_secret_key'] = array(
     '#type' => 'password',
     '#title' => t('Secret Key'),
-    '#default_value' => variable_get('devernote_secret_key', ''),
+    '#default_value' => $secret,
     '#description' => t('The Secret Key provided by Evernote when signing up for an API Key.'),
   );
 
@@ -129,9 +139,35 @@ function devernote_settings_form() {
     );
   }
 
-  $form['#submit'][] = 'delete_auth_handler';
+  //$form['#submit'][] = 'delete_auth_handler';
+  $form['#submit'][] = 'save_keys_handler';
 
   return system_settings_form($form);
+}
+
+
+function save_keys_handler($form, &$form_state) {
+
+  global $user;
+
+  $secret = $form_state['values']['devernote_secret_key'];
+  if (module_exists('aes')) {
+    $secret = aes_encrypt($secret);
+  }
+  elseif (module_exists('encrypt')) {
+    $secret = encrypt($secret);
+  }
+  $consumer = $form_state['values']['devernote_consumer_key'];
+
+  db_merge('devernote_user')
+  ->key(array('uid' => $user->uid))
+  ->fields(array(
+      'secret_key' => $secret,
+      'consumer_key' => $consumer,
+  ))
+  ->execute();
+
+  global $user;
 }
 
 
