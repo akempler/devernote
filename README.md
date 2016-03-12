@@ -1,7 +1,7 @@
 
 Provides ability to import Evernote notes as Drupal nodes.
 --------------------------------------
-http://adamkempler.com
+http://adamkempler.com/content/import-evernote-notes-drupal-devernote-module
 
 
 ### Installation and Setup
